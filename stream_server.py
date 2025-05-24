@@ -13,11 +13,11 @@ import errno
 app = Flask(__name__)
 
 # Ensure log directory exists
-log_dir = '/var/log/wedidit'
+log_dir = '/var/log/streamApp'
 os.makedirs(log_dir, exist_ok=True)
 
 # Configure logging
-handler = RotatingFileHandler('/var/log/wedidit/stream_server.log', maxBytes=10000, backupCount=3)
+handler = RotatingFileHandler('/var/log/streamApp/stream_server.log', maxBytes=10000, backupCount=3)
 handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)

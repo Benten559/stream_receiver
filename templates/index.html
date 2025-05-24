@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Stream</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        #stream-container {
+            max-width: 100%;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        #video-stream {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        #status-section {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #connection-status {
+            padding: 10px;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        #error-message {
+            color: red;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Live Video Stream</h1>
+    
+    <div id="stream-container">
+        <img id="video-stream" src="/video_feed" alt="Video Stream">
+    </div>
+
+    <div id="status-section">
+        <button id="check-status-btn">Check Server Status</button>
+        <div id="connection-status">Status: Not checked</div>
+        <div id="error-message"></div>
+    </div>
+
+    <script>
+        const videoStream = document.getElementById('video-stream');
+        const statusBtn = document.getElementById('check-status-btn');
+        const connectionStatus = document.getElementById('connection-status');
+        const errorMessage = document.getElementById('error-message');
+
+        // Function to check server status
+        async function checkServerStatus() {
+            try {
+                const response = await fetch('/status');
+                if (!response.ok) {
+                    throw new Error('Server status check failed');
+                }
+                const status = await response.json();
+                
+                connectionStatus.textContent = `Server Status:
+                    Queue Size: ${status.queue_size}
+                    Server Running: ${status.server_running ? 'Yes' : 'No'}`;
+                errorMessage.style.display = 'none';
+            } catch (error) {
+                connectionStatus.textContent = 'Status: Unable to connect';
+                errorMessage.textContent = `Error: ${error.message}`;
+                errorMessage.style.display = 'block';
+            }
+        }
+
+        // Event listener for status check button
+        statusBtn.addEventListener('click', checkServerStatus);
+
+        // Reload image if it fails to load
+        videoStream.addEventListener('error', function() {
+            console.error('Stream connection lost. Attempting to reconnect...');
+            setTimeout(() => {
+                videoStream.src = '/video_feed?' + new Date().getTime();
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
