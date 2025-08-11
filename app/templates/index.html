@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Receiver</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .video-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        img {
+            max-width: 100%;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Raspberry Pi Camera Stream</h1>
+        
+        <div class="video-container">
+            <img id="videoFeed" src="/video_feed" alt="Camera Stream" 
+                 onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjIwMCIgeT0iMTUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE4IiBmaWxsPSIjOTk5Ij5ObyBTdHJlYW08L3RleHQ+PC9zdmc+'">
+        </div>
+        
+        <div class="status">
+            <button onclick="refreshStream()">Refresh Stream</button>
+            <button onclick="checkStatus()">Check Status</button>
+        </div>
+        
+        <div id="statusInfo" style="margin-top: 20px;"></div>
+    </div>
+
+    <script>
+        function refreshStream() {
+            const img = document.getElementById('videoFeed');
+            const timestamp = new Date().getTime();
+            img.src = '/video_feed?' + timestamp;
+        }
+        
+        function checkStatus() {
+            fetch('/status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('statusInfo').innerHTML = 
+                        '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                })
+                .catch(error => {
+                    document.getElementById('statusInfo').innerHTML = 
+                        '<p style="color: red;">Error fetching status: ' + error + '</p>';
+                });
+        }
+        
+        // Auto-refresh status every 30 seconds
+        setInterval(checkStatus, 30000);
+        
+        // Load initial status
+        checkStatus();
+    </script>
+</body>
+</html>
