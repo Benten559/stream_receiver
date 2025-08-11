@@ -80,7 +80,7 @@ deploy_redis() {
         -v $REDIS_VOLUME:/data:Z \
         -v /var/log/redis:/var/log/redis:Z \
         --restart unless-stopped \
-        redis:alpine \
+        docker.io/library/redis:alpine \
         redis-server --loglevel verbose --logfile /var/log/redis/redis.log --appendonly yes
     
     echo "✅ Redis deployed"
