@@ -5,16 +5,9 @@ import time
 import os
 import sys
 from typing import Optional
+from picamera2 import Picamera2
 import cv2
 import logging
-
-# Try to import picamera2, but don't fail if it's not available
-try:
-    from picamera2 import Picamera2
-    PICAMERA2_AVAILABLE = True
-except ImportError:
-    PICAMERA2_AVAILABLE = False
-    logging.warning("Picamera2 not available, will use OpenCV only")
 
 # Configure logging
 logging.basicConfig(
@@ -112,26 +105,22 @@ class PiCameraStreamer:
         
     def _setup_camera(self):
         """Setup camera - try Picamera2 first, fallback to OpenCV"""
-        # Try Picamera2 if available
-        if PICAMERA2_AVAILABLE:
-            try:
-                self.camera = Picamera2()
-                self._camera_type = 'picam2'
-                
-                # Configure camera
-                config = self.camera.create_preview_configuration(
-                    main={"size": (self.width, self.height)}
-                )
-                self.camera.configure(config)
-                self.camera.start()
-                
-                logging.info("Using Picamera2")
-                return
-                
-            except Exception as e:
-                logging.warning(f"Picamera2 failed: {e}, trying OpenCV...")
-        else:
-            logging.info("Picamera2 not available, using OpenCV")
+        try:
+            self.camera = Picamera2()
+            self._camera_type = 'picam2'
+            
+            # Configure camera
+            config = self.camera.create_preview_configuration(
+                main={"size": (self.width, self.height)}
+            )
+            self.camera.configure(config)
+            self.camera.start()
+            
+            logging.info("Using Picamera2")
+            return
+            
+        except Exception as e:
+            logging.warning(f"Picamera2 failed: {e}, trying OpenCV...")
 
         # Fallback to OpenCV
         try:

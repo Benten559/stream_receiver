@@ -5,7 +5,8 @@ Main entry point.
 import os
 from flask import Flask
 
-from app.api import routes, health
+from app.api import routes
+# from app.api import health
 from app.core.broadcaster import EfficientFrameBroadcaster
 from app.utils.logging import setup_logging
 from app.config import get_config
@@ -49,7 +50,7 @@ def create_app(config_name=None):
     
     # Register blueprints
     app.register_blueprint(routes.bp)
-    app.register_blueprint(health.bp, url_prefix='/health')
+    # app.register_blueprint(health.bp, url_prefix='/health')
 
     # Add shutdown handler
     @app.teardown_appcontext

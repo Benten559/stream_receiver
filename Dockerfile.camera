@@ -1,30 +1,20 @@
-# Multi-stage build for Raspberry Pi camera client
-FROM python:3.11-slim-bullseye as builder
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    libopencv-dev \
-    python3-opencv \
-    && rm -rf /var/lib/apt/lists/*
-
-# Runtime image
-FROM python:3.11-slim-bullseye
+# Use Debian Bookworm which has better Pi support
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install runtime dependencies for Raspberry Pi camera
+# Install system dependencies for picamera2 and camera hardware
 RUN apt-get update && apt-get install -y \
+    python3-picamera2 \
+    python3-libcamera \
+    python3-kms++ \
+    python3-prctl \
+    python3-pidng \
     python3-opencv \
-    libgstreamer1.0-0 \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    libatlas-base-dev \
+    libcamera-apps-lite \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies - use system opencv to avoid build issues
+# Install additional Python dependencies via pip
 RUN pip install --no-cache-dir \
     redis==6.2.0 \
     numpy==1.24.3
