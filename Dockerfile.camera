@@ -21,20 +21,13 @@ RUN apt-get update && apt-get install -y \
     libgstreamer1.0-0 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
     libatlas-base-dev \
-    build-essential \
-    python3-dev \
-    libcamera-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies directly (including picamera2 via pip)
+# Install Python dependencies - use system opencv to avoid build issues
 RUN pip install --no-cache-dir \
     redis==6.2.0 \
-    opencv-python-headless==4.8.1.78 \
-    numpy==1.24.3 \
-    picamera2
+    numpy==1.24.3
 
 # Copy camera client script
 COPY cam_stream_client.py .
