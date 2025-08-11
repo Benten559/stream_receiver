@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app/ app/
-COPY templates/ templates/
 
 # Create log directory
 RUN mkdir -p /app/logs/stream_receiver
