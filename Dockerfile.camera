@@ -3,22 +3,20 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies for picamera2 and camera hardware
+# Install system dependencies for camera access
 RUN apt-get update && apt-get install -y \
-    python3-picamera2 \
-    python3-libcamera \
-    python3-kms++ \
-    python3-prctl \
-    python3-pidng \
-    python3-opencv \
-    libcamera-apps-lite \
+    libgstreamer1.0-0 \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    libatlas-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install additional Python dependencies via pip
+# Install Python dependencies via pip
 RUN pip install --no-cache-dir \
     redis==6.2.0 \
     numpy==1.24.3 \
-    opencv-python-headless==4.8.1.78
+    opencv-python-headless==4.8.1.78 \
+    picamera2
 
 # Copy camera client script
 COPY cam_stream_client.py .
