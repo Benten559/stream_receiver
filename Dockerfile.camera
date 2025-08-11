@@ -17,44 +17,21 @@ WORKDIR /app
 
 # Install runtime dependencies for Raspberry Pi camera
 RUN apt-get update && apt-get install -y \
-    libopencv-core-dev \
-    libopencv-imgproc-dev \
-    libopencv-imgcodecs-dev \
-    libopencv-highgui-dev \
-    libatlas-base-dev \
-    libhdf5-dev \
-    libhdf5-serial-dev \
-    libatlas3-base \
-    libjasper-dev \
-    libqtgui4 \
-    libqt4-test \
+    python3-opencv \
+    python3-picamera2 \
     libgstreamer1.0-0 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav \
-    gstreamer1.0-doc \
-    gstreamer1.0-tools \
-    gstreamer1.0-x \
-    gstreamer1.0-alsa \
-    gstreamer1.0-gl \
-    gstreamer1.0-gtk3 \
-    gstreamer1.0-qt5 \
-    gstreamer1.0-pulseaudio \
-    python3-picamera2 \
+    libatlas-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create camera requirements file
-COPY <<EOF requirements-camera.txt
-redis==6.2.0
-opencv-python-headless==4.8.1.78
-picamera2==0.3.17
-numpy==1.24.3
-EOF
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements-camera.txt
+# Install Python dependencies directly
+RUN pip install --no-cache-dir \
+    redis==6.2.0 \
+    opencv-python-headless==4.8.1.78 \
+    numpy==1.24.3
 
 # Copy camera client script
 COPY cam_stream_client.py .
