@@ -4,9 +4,11 @@ FROM python:3.11-slim-bullseye
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies for Flask app
+# Install system dependencies for Flask app and camera support
 RUN apt-get update && apt-get install -y \
     curl \
+    libcamera-dev \
+    python3-libcamera \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
