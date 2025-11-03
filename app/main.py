@@ -1,13 +1,11 @@
 """
-Main entry point.
+Main entry point for video streaming application.
 """
 
 import os
 from flask import Flask
-
 from app.api import routes
-# from app.api import health
-from app.core.broadcaster import EfficientFrameBroadcaster
+from app.core.frame_broadcaster import FrameBroadcaster
 from app.utils.logging import setup_logging
 from app.config import get_config
 
@@ -39,7 +37,7 @@ def create_app(config_name=None):
     setup_logging(app, config)
 
     # Initialize broadcaster
-    broadcaster = EfficientFrameBroadcaster(
+    broadcaster = FrameBroadcaster(
         redis_host=app.config['REDIS_HOST'],
         redis_port=app.config['REDIS_PORT'],
         channel=app.config['REDIS_CHANNEL']
@@ -50,7 +48,6 @@ def create_app(config_name=None):
     
     # Register blueprints
     app.register_blueprint(routes.bp)
-    # app.register_blueprint(health.bp, url_prefix='/health')
 
     # Add shutdown handler
     @app.teardown_appcontext

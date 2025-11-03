@@ -84,8 +84,9 @@ class ProductionConfig(Config):
     # Override with production values
     SECRET_KEY = os.getenv('SECRET_KEY')
 
-    if not SECRET_KEY:
-        raise ValueError("SECRET_KEY environment variable must be set in production")
+    def __post_init__(self):
+        if not self.SECRET_KEY:
+            raise ValueError("SECRET_KEY environment variable must be set in production")
 
 
 class TestingConfig(Config):

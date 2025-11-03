@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stream Receiver</title>
+    <title>The Stream</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -52,28 +52,20 @@
 </head>
 <body>
     <div class="container">
-        <h1>Raspberry Pi Camera Stream</h1>
+        <h1>The Stream</h1>
         
         <div class="video-container">
-            <img id="videoFeed" src="/video_feed" alt="Camera Stream" 
-                 onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iNDAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0iI2VlZSIvPjx0ZXh0IHg9IjIwMCIgeT0iMTUwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE4IiBmaWxsPSIjOTk5Ij5ObyBTdHJlYW08L3RleHQ+PC9zdmc+'">
+            <img id="videoFeed" src="/video_stream" alt="Camera Stream">
         </div>
         
         <div class="status">
-            <button onclick="refreshStream()">Refresh Stream</button>
             <button onclick="checkStatus()">Check Status</button>
         </div>
         
-        <div id="statusInfo" style="margin-top: 20px;"></div>
+        <div id="statusInfo"></div>
     </div>
 
     <script>
-        function refreshStream() {
-            const img = document.getElementById('videoFeed');
-            const timestamp = new Date().getTime();
-            img.src = '/video_feed?' + timestamp;
-        }
-        
         function checkStatus() {
             fetch('/status')
                 .then(response => response.json())
@@ -83,15 +75,12 @@
                 })
                 .catch(error => {
                     document.getElementById('statusInfo').innerHTML = 
-                        '<p style="color: red;">Error fetching status: ' + error + '</p>';
+                        '<p style="color: red;">Error: ' + error + '</p>';
                 });
         }
         
-        // Auto-refresh status every 30 seconds
-        setInterval(checkStatus, 30000);
-        
-        // Load initial status
         checkStatus();
+        setInterval(checkStatus, 30000);
     </script>
 </body>
 </html>
