@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    // File Layout - no rootDir to allow importing from parent directories
+    "outDir": "../../public/js",
+
+    // Browser Environment
+    "target": "ES2020",
+    "module": "ES2022",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+
+    // No Node types for client code
+    "types": [],
+
+    // Other Outputs
+    "sourceMap": true,
+    "declaration": false,
+
+    // Stricter Typechecking
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    // Recommended Options
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
