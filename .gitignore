@@ -132,6 +132,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# TS/JS
+node_modules/
+dist/
+public/
+
 # Spyder project settings
 .spyderproject
 .spyproject

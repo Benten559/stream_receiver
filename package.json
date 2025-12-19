@@ -1,0 +1,37 @@
+{
+  "name": "stream_receiver",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Web Server for Redis camera streams",
+  "main": "index.js",
+  "scripts": {
+    "test": "ts-node src/server.ts",
+    "dev": "nodemon --exec ts-node src/server.ts",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc",
+    "build:client": "tsc -p src/client/tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Benten559/stream_receiver.git"
+  },
+  "author": "Benten559",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Benten559/stream_receiver/issues"
+  },
+  "homepage": "https://github.com/Benten559/stream_receiver#readme",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "redis": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.10.1",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
