@@ -135,7 +135,7 @@ venv.bak/
 # TS/JS
 node_modules/
 dist/
-public/
+public/js
 
 # Spyder project settings
 .spyderproject
