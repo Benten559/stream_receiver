@@ -84,6 +84,13 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
 
     // Subscribe to camera frames
     const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
+        // Check if response is still writable before attempting write
+        if (!res.writable) {
+            console.log(`Response not writable for ${cameraId}, unsubscribing`);
+            unsubscribe();
+            return;
+        }
+
         try {
             // Send frame in multipart format
             res.write('--frame\r\n');
@@ -94,6 +101,7 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
             res.write('\r\n');
         } catch (err) {
             console.error(`Error writing frame for camera ${cameraId}:`, err);
+            unsubscribe();
         }
     });
 
@@ -109,6 +117,7 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
             res.write('\r\n');
         } catch (err) {
             console.error(`Error writing initial frame for camera ${cameraId}:`, err);
+            unsubscribe();
         }
     }
 
@@ -145,26 +154,50 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
     // Send initial comment to establish connection
     res.write(': connected\n\n');
 
+    console.log(`Client connected to SSE stream: ${cameraId}`);
+
     // Subscribe to camera frames
     const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
-        // Convert frame to base64 for transmission
-        const base64Frame = frameData.toString('base64');
+        // Check if response is still writable BEFORE attempting write
+        if (!res.writable) {
+            console.log(`SSE response not writable for ${cameraId}, unsubscribing`);
+            unsubscribe();
+            return;
+        }
 
-        res.write(`event: frame\n`);
-        res.write(`data: ${base64Frame}\n\n`);
+        try {
+            // Convert frame to base64 for transmission
+            const base64Frame = frameData.toString('base64');
+
+            res.write(`event: frame\n`);
+            res.write(`data: ${base64Frame}\n\n`);
+        } catch (err) {
+            console.error(`Error writing SSE frame for camera ${cameraId}:`, err);
+            unsubscribe();
+        }
     });
 
     const initialFrame = cameraService.getLatestFrame(cameraId);
     if (initialFrame) {
-        const base64Frame = initialFrame.toString('base64');
-        res.write(`event: frame\n`);
-        res.write(`data: ${base64Frame}\n\n`);
+        try {
+            const base64Frame = initialFrame.toString('base64');
+            res.write(`event: frame\n`);
+            res.write(`data: ${base64Frame}\n\n`);
+        } catch (err) {
+            console.error(`Error writing initial SSE frame for camera ${cameraId}:`, err);
+            unsubscribe();
+        }
     }
 
     req.on('close', () => {
-        console.log(`Client disconnected from camera: ${cameraId}`);
+        console.log(`Client disconnected from SSE stream: ${cameraId}`);
         unsubscribe();
         res.end();
+    });
+
+    req.on('error', (err) => {
+        console.error(`Request error for SSE camera ${cameraId}:`, err);
+        unsubscribe();
     });
 });
 
