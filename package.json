@@ -25,7 +25,8 @@
   "dependencies": {
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "redis": "^5.10.0"
+    "redis": "^5.10.0",
+    "webfft": "^1.0.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

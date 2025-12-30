@@ -1,4 +1,16 @@
 import type { AvailableCamerasResponse } from '../../types/api.types.js';
+import { SSEStreamClient } from './streaming/sse_client.js';
+import { CanvasRenderer } from './streaming/canvas_renderer.js';
+import { FeatureManager } from './features/feature_manager.js';
+import { duplicateFeature } from './features/duplicate_stream.js';
+import { fftFeature } from './features/fft_stream.js';
+import { setupFeatureToggles } from './features/setup_features.js';
+import type { RawFrame } from './types/streaming.types.js';
+
+// Track current stream
+let currentStreamClient: SSEStreamClient | null = null;
+let currentRenderer: CanvasRenderer | null = null;
+let currentFeatureManager: FeatureManager | null = null;
 
 /**
  * @description Gives an array of all cameras server can stream
@@ -18,7 +30,7 @@ async function fetchAvailableCameras(): Promise<string[]> {
 
 /**
  * @description Makes a button for each available stream
- * @param cameraId 
+ * @param cameraId
  * @returns HTMLButtonElement
  */
 function createCameraButton(cameraId: string): HTMLButtonElement {
@@ -27,7 +39,7 @@ function createCameraButton(cameraId: string): HTMLButtonElement {
   button.className = 'camera-button';
   button.addEventListener('click', () => {
     console.log(`Viewing camera: ${cameraId}`);
-    setStreamViewer(cameraId);
+    startSSEStream(cameraId);
   });
   return button;
 }
@@ -52,44 +64,112 @@ function renderCameraButtons(cameras: string[]): void {
 }
 
 /**
- * @description When a button is clicked add an updating-img element to page
- * @param cameraId 
- * @returns 
+ * @description Start SSE stream for a camera using canvas rendering with feature support
+ * @param cameraId - The camera to stream
  */
-function setStreamViewer(cameraId: string): HTMLImageElement {
-  const streamViewElement = document.getElementById("stream-viewer");
-  const imgElement = document.createElement('img');
+function startSSEStream(cameraId: string): void {
+  const streamViewElement = document.getElementById('stream-viewer');
 
-  if (!streamViewElement){
-    console.error(`stream-viewer element not found!`);
-    return imgElement;
+  if (!streamViewElement) {
+    console.error('stream-viewer element not found!');
+    return;
   }
 
-  // Clear out previous stream
+  // Cleanup previous stream
+  cleanupCurrentStream();
+
+  // Clear container
   streamViewElement.innerHTML = '';
 
-  // Create MJPEG stream
-  imgElement.src = `/camera/stream/${cameraId}`;
-  imgElement.alt = `${cameraId} video feed`;
-  imgElement.style.maxWidth = '100%';
-  imgElement.style.height = 'auto';
-  imgElement.style.border = '2px solid #ddd';
-  imgElement.style.borderRadius = '4px';
+  try {
+    // Create canvas renderer for original stream
+    currentRenderer = new CanvasRenderer(
+      'stream-viewer',
+      cameraId,
+      `Camera: ${cameraId} (Original)`
+    );
 
-  // When something goes wrong in rendering image data
-  imgElement.onerror = () => {
-    console.error(`Failed to load stream for camera: ${cameraId}`);
-    const errorMsg = document.createElement('p');
-    errorMsg.textContent = `Failed to stream camera: ${cameraId}`;
-    errorMsg.style.color = 'red';
-    streamViewElement.innerHTML = '';
-    streamViewElement.appendChild(errorMsg);
-  };
+    // Create SSE client
+    currentStreamClient = new SSEStreamClient(cameraId);
 
-  streamViewElement.appendChild(imgElement);
+    // Create feature manager (handles frame distribution)
+    currentFeatureManager = new FeatureManager(
+      currentStreamClient,
+      cameraId,
+      currentRenderer
+    );
 
-  return imgElement;
+    // Register available features
+    currentFeatureManager.registerFeature(duplicateFeature);
+    currentFeatureManager.registerFeature(fftFeature);
+
+    // Setup feature toggle buttons
+    setupFeatureToggles(currentFeatureManager);
+
+    // Handle connection events
+    currentStreamClient.addEventListener('connected', () => {
+      console.log(`Connected to camera: ${cameraId}`);
+    });
+
+    currentStreamClient.addEventListener('disconnected', () => {
+      console.log(`Disconnected from camera: ${cameraId}`);
+    });
+
+    currentStreamClient.addEventListener('error', (event: Event) => {
+      console.error('SSE connection error:', event);
+      showError(streamViewElement, `Failed to stream camera: ${cameraId}`);
+    });
+
+    // Connect to SSE stream
+    currentStreamClient.connect();
+
+  } catch (error) {
+    console.error('Failed to start SSE stream:', error);
+    showError(streamViewElement, `Failed to initialize stream for camera: ${cameraId}`);
+  }
 }
+
+/**
+ * @description Cleanup current stream (disconnect and destroy)
+ */
+function cleanupCurrentStream(): void {
+  if (currentFeatureManager) {
+    currentFeatureManager.destroy();
+    currentFeatureManager = null;
+  }
+
+  if (currentStreamClient) {
+    currentStreamClient.disconnect();
+    currentStreamClient = null;
+  }
+
+  if (currentRenderer) {
+    currentRenderer.destroy();
+    currentRenderer = null;
+  }
+
+  // Clear feature options
+  const featureOptions = document.getElementById('feature-options');
+  if (featureOptions) {
+    featureOptions.innerHTML = '';
+  }
+}
+
+/**
+ * @description Show error message
+ */
+function showError(container: HTMLElement, message: string): void {
+  container.innerHTML = '';
+  const errorMsg = document.createElement('p');
+  errorMsg.textContent = message;
+  errorMsg.style.color = 'red';
+  container.appendChild(errorMsg);
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  cleanupCurrentStream();
+});
 
 const cameras = await fetchAvailableCameras();
 console.log('Available cameras:', cameras);
