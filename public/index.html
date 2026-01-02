@@ -3,8 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SEC</title>
+    <title>SEC - Spotter Scope</title>
     <link rel="stylesheet" href="/css/styles.css">
+    <!-- OpenCV.js Loading -->
+    <script>
+        let cvReady = false;
+
+        function onOpenCvReady() {
+            cvReady = true;
+            console.log('OpenCV.js loaded and ready');
+            window.dispatchEvent(new Event('opencv-ready'));
+        }
+
+        // Configure OpenCV.js module
+        var Module = {
+            onRuntimeInitialized: onOpenCvReady
+        };
+    </script>
+    <script async src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.1/dist/opencv.min.js" type="text/javascript"></script>
     <script type="importmap">
     {
         "imports": {
@@ -15,7 +31,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>Camera Streams</h1>
+        <h1>Camera Streams - Spotter Scope</h1>
         <div id="camera-buttons"></div>
         <div id="stream-viewer"></div>
         <div id="feature-options"></div>
