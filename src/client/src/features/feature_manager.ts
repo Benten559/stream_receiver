@@ -4,14 +4,22 @@
 
 import { SSEStreamClient } from '../streaming/sse_client.js';
 import { CanvasRenderer } from '../streaming/canvas_renderer.js';
-import type { Feature, RawFrame } from '../types/streaming.types.js';
+import type { Feature, RawFrame, FeatureContext } from '../types/streaming.types.js';
 
 export class FeatureManager {
+  // Stream management
   private streamClient: SSEStreamClient;
   private cameraId: string;
   private originalRenderer: CanvasRenderer;
+
+  // Feature registry
   private features: Map<string, Feature> = new Map();
-  private featureRenderers: Map<string, CanvasRenderer> = new Map();
+
+  // Shared canvas for feature pipeline
+  private sharedCanvasRenderer: CanvasRenderer | null = null;
+  private sharedCanvas: HTMLCanvasElement | null = null;
+
+  // Event handling
   private frameHandler: ((event: Event) => void) | null = null;
 
   constructor(streamClient: SSEStreamClient, cameraId: string, originalRenderer: CanvasRenderer) {
@@ -33,7 +41,11 @@ export class FeatureManager {
       return;
     }
 
-    console.log(`Registering feature: ${feature.name}`);
+    console.log(`Registering feature: ${feature.name}`, {
+      layer: feature.pipeline.layer,
+      provides: feature.pipeline.provides,
+      consumes: feature.pipeline.consumes,
+    });
     this.features.set(feature.id, feature);
   }
 
@@ -51,29 +63,31 @@ export class FeatureManager {
     console.log(`Toggling feature ${feature.name}: ${enabled ? 'ON' : 'OFF'}`);
     feature.enabled = enabled;
 
-    if (enabled) {
-      // Create canvas for this feature
-      this.createFeatureCanvas(feature);
-    } else {
-      // Destroy canvas for this feature
-      this.destroyFeatureCanvas(featureId);
-    }
+    // Manage shared canvas lifecycle
+    enabled ? this.ensureSharedCanvas() : this.cleanupSharedCanvasIfNeeded();
 
-    // Emit toggle event
-    const toggleEvent = new CustomEvent('featuretoggle', {
-      detail: {
-        featureId,
-        enabled,
-      },
-    });
-    window.dispatchEvent(toggleEvent);
+    // Notify UI of toggle
+    this.emitFeatureToggleEvent(featureId, enabled);
   }
 
   /**
-   * Get all active features
+   * Emit feature toggle event for UI listeners
+   */
+  private emitFeatureToggleEvent(featureId: string, enabled: boolean): void {
+    const event = new CustomEvent('featuretoggle', {
+      detail: { featureId, enabled },
+    });
+    window.dispatchEvent(event);
+  }
+
+  /**
+   * Get all active features sorted by pipeline layer
    */
   getActiveFeatures(): Feature[] {
-    return Array.from(this.features.values()).filter(f => f.enabled);
+    const active = Array.from(this.features.values()).filter(f => f.enabled);
+
+    // Sort by layer (lower layers drawn first)
+    return active.sort((a, b) => a.pipeline.layer - b.pipeline.layer);
   }
 
   /**
@@ -84,36 +98,39 @@ export class FeatureManager {
   }
 
   /**
-   * Create canvas for a feature
+   * Ensure shared canvas exists
    */
-  private createFeatureCanvas(feature: Feature): void {
-    if (this.featureRenderers.has(feature.id)) {
-      console.warn(`Canvas already exists for feature: ${feature.id}`);
-      return;
+  private ensureSharedCanvas(): void {
+    if (this.sharedCanvasRenderer) {
+      return; // Already exists
     }
 
     try {
-      const renderer = new CanvasRenderer(
+      this.sharedCanvasRenderer = new CanvasRenderer(
         'stream-viewer',
-        feature.id,
-        feature.name
+        'features-composite',
+        'Features (Composite)'
       );
 
-      this.featureRenderers.set(feature.id, renderer);
+      this.sharedCanvas = this.sharedCanvasRenderer.getCanvas();
+
+      console.log('Shared features canvas created');
     } catch (error) {
-      console.error(`Failed to create canvas for feature ${feature.id}:`, error);
+      console.error('Failed to create shared canvas:', error);
     }
   }
 
   /**
-   * Destroy canvas for a feature
+   * Cleanup shared canvas if no features are enabled
    */
-  private destroyFeatureCanvas(featureId: string): void {
-    const renderer = this.featureRenderers.get(featureId);
+  private cleanupSharedCanvasIfNeeded(): void {
+    const hasEnabledFeatures = this.getActiveFeatures().length > 0;
 
-    if (renderer) {
-      renderer.destroy();
-      this.featureRenderers.delete(featureId);
+    if (!hasEnabledFeatures && this.sharedCanvasRenderer) {
+      this.sharedCanvasRenderer.destroy();
+      this.sharedCanvasRenderer = null;
+      this.sharedCanvas = null;
+      console.log('Shared features canvas destroyed (no active features)');
     }
   }
 
@@ -139,27 +156,102 @@ export class FeatureManager {
   }
 
   /**
-   * Process all active features with the decoded frame
+   * Process all active features using context pipeline
    */
   private async processFeatures(imageData: ImageData): Promise<void> {
     const activeFeatures = this.getActiveFeatures();
 
-    for (const feature of activeFeatures) {
-      const renderer = this.featureRenderers.get(feature.id);
+    if (activeFeatures.length === 0) {
+      return;
+    }
 
-      if (!renderer) {
-        console.warn(`No renderer found for active feature: ${feature.id}`);
-        continue;
-      }
+    if (!this.prepareSharedCanvas(imageData)) {
+      return; // Canvas preparation failed
+    }
 
+    // Run feature pipeline with context flow
+    await this.runFeaturePipeline(activeFeatures, imageData);
+  }
+
+  /**
+   * Prepare shared canvas for rendering (create, resize, clear)
+   * @returns true if canvas is ready, false otherwise
+   */
+  private prepareSharedCanvas(imageData: ImageData): boolean {
+    this.ensureSharedCanvas();
+
+    if (!this.sharedCanvas) {
+      console.warn('Shared canvas not available');
+      return false;
+    }
+
+    // Resize if needed
+    if (
+      this.sharedCanvas.width !== imageData.width ||
+      this.sharedCanvas.height !== imageData.height
+    ) {
+      this.sharedCanvas.width = imageData.width;
+      this.sharedCanvas.height = imageData.height;
+    }
+
+    // Clear canvas
+    const ctx = this.sharedCanvas.getContext('2d');
+    if (ctx) {
+      ctx.clearRect(0, 0, this.sharedCanvas.width, this.sharedCanvas.height);
+    }
+
+    return true;
+  }
+
+  /**
+   * Run the feature pipeline, passing context between features
+   */
+  private async runFeaturePipeline(
+    features: Feature[],
+    imageData: ImageData
+  ): Promise<void> {
+    let context: FeatureContext = {};
+
+    for (const feature of features) {
       try {
-        // Call feature processor
-        await feature.process(imageData, renderer.getCanvas());
+        const result = await feature.process(
+          imageData,
+          this.sharedCanvas!,
+          context
+        );
+
+        // Merge feature output into pipeline context
+        context = this.mergeContext(context, result, feature);
       } catch (error) {
         console.error(`Feature ${feature.id} processing failed:`, error);
-        // Continue processing other features
+        // Continue with next feature (don't let one failure break the pipeline)
       }
     }
+  }
+
+  /**
+   * Merge feature result into pipeline context
+   */
+  private mergeContext(
+    context: FeatureContext,
+    result: FeatureContext | void,
+    feature: Feature
+  ): FeatureContext {
+    if (!result || typeof result !== 'object') {
+      return context;
+    }
+
+    // Debug: Log what this feature provided
+    if (feature.pipeline.provides && feature.pipeline.provides.length > 0) {
+      const provided = feature.pipeline.provides.filter(
+        (key) => key in result
+      );
+      if (provided.length > 0) {
+        console.log(`Feature ${feature.id} provided:`, provided);
+      }
+    }
+
+    return { ...context, ...result };
   }
 
   /**
@@ -172,12 +264,13 @@ export class FeatureManager {
       this.frameHandler = null;
     }
 
-    // Destroy all feature canvases
-    for (const featureId of this.featureRenderers.keys()) {
-      this.destroyFeatureCanvas(featureId);
+    // Destroy shared canvas
+    if (this.sharedCanvasRenderer) {
+      this.sharedCanvasRenderer.destroy();
+      this.sharedCanvasRenderer = null;
+      this.sharedCanvas = null;
     }
 
     this.features.clear();
-    this.featureRenderers.clear();
   }
 }
