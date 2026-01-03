@@ -4,6 +4,7 @@
 
 import type { Feature } from '../types/streaming.types.js';
 import type { FeatureManager } from './feature_manager.js';
+import { setupBulletHoleControls } from './bullet_hole_detection.js';
 
 /**
  * Create feature toggle buttons in the UI
@@ -57,6 +58,17 @@ function createFeatureButton(feature: Feature, featureManager: FeatureManager): 
     } else {
       button.classList.remove('enabled');
       button.classList.add('disabled');
+    }
+
+    // Show/hide bullet hole controls
+    if (feature.id === 'bullet-holes') {
+      if (newState) {
+        setupBulletHoleControls();
+      } else {
+        // Remove controls when feature is disabled
+        const controlPanel = document.getElementById('bullet-hole-controls');
+        if (controlPanel) controlPanel.remove();
+      }
     }
   });
 

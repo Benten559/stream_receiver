@@ -2,9 +2,8 @@ import type { AvailableCamerasResponse } from '../../types/api.types.js';
 import { SSEStreamClient } from './streaming/sse_client.js';
 import { CanvasRenderer } from './streaming/canvas_renderer.js';
 import { FeatureManager } from './features/feature_manager.js';
-import { duplicateFeature } from './features/duplicate_stream.js';
-import { fftFeature } from './features/fft_stream.js';
 import { fiducialFeature } from './features/fiducial_detection.js';
+import { bulletHoleFeature } from './features/bullet_hole_detection.js';
 import { setupFeatureToggles } from './features/setup_features.js';
 import type { RawFrame } from './types/streaming.types.js';
 
@@ -113,9 +112,8 @@ function startSSEStream(cameraId: string): void {
     );
 
     // Register available features
-    // currentFeatureManager.registerFeature(duplicateFeature);
-    // currentFeatureManager.registerFeature(fftFeature);
     currentFeatureManager.registerFeature(fiducialFeature);
+    currentFeatureManager.registerFeature(bulletHoleFeature);
 
     // Setup feature toggle buttons
     setupFeatureToggles(currentFeatureManager);
