@@ -4,7 +4,7 @@
  * for spotter scope calibration and target tracking
  */
 
-import type { Feature, FeatureProcessor } from '../types/streaming.types.js';
+import type { Feature, FeatureProcessor, FeatureContext } from '../types/streaming.types.js';
 
 // OpenCV types global cv
 declare const cv: any;
@@ -26,7 +26,7 @@ let state: DetectionState | null = null;
 /**
  * Detected marker data
  */
-interface DetectedMarker {
+export interface DetectedMarker {
   id: number;
   corners: { x: number; y: number }[];
   center: { x: number; y: number };
@@ -352,29 +352,21 @@ function updateFPS(): void {
 }
 
 /**
- * Fiducial detection processor
+ * Fiducial detection processor with context pipeline
  */
 const fiducialProcessor: FeatureProcessor = (
   sourceImageData: ImageData,
-  outputCanvas: HTMLCanvasElement
-): void => {
-  const ctx = outputCanvas.getContext('2d');
+  sharedCanvas: HTMLCanvasElement,
+  context: Readonly<FeatureContext>
+): FeatureContext => {
+  const ctx = sharedCanvas.getContext('2d');
 
   if (!ctx) {
     console.error('Failed to get 2D context for fiducial canvas');
-    return;
+    return {};
   }
 
-  // Set canvas size to match source
-  if (
-    outputCanvas.width !== sourceImageData.width ||
-    outputCanvas.height !== sourceImageData.height
-  ) {
-    outputCanvas.width = sourceImageData.width;
-    outputCanvas.height = sourceImageData.height;
-  }
-
-  // Draw original image first
+  // Draw original image first (base layer)
   ctx.putImageData(sourceImageData, 0, 0);
 
   // Check if OpenCV is ready
@@ -386,7 +378,7 @@ const fiducialProcessor: FeatureProcessor = (
     ctx.font = '16px Arial';
     ctx.textAlign = 'left';
     ctx.fillText('OpenCV.js Loading...', 10, 30);
-    return;
+    return {};
   }
 
   // Initialize detector if needed
@@ -397,7 +389,7 @@ const fiducialProcessor: FeatureProcessor = (
     ctx.font = '16px Arial';
     ctx.textAlign = 'left';
     ctx.fillText('Failed to initialize detector', 10, 30);
-    return;
+    return {};
   }
 
   try {
@@ -418,13 +410,17 @@ const fiducialProcessor: FeatureProcessor = (
       sourceImageData.width,
       sourceImageData.height
     );
+
+    // Return markers in context for downstream features
+    return { markers };
   } catch (error) {
     console.error('Fiducial processing failed:', error);
+    return {};
   }
 };
 
 /**
- * Fiducial detection feature definition
+ * Fiducial detection feature definition with pipeline metadata
  */
 export const fiducialFeature: Feature = {
   id: 'fiducial-detection',
@@ -432,4 +428,9 @@ export const fiducialFeature: Feature = {
   description: 'Detect and highlight ArUco markers (5x5, IDs 0-99)',
   process: fiducialProcessor,
   enabled: false,
+  pipeline: {
+    provides: ['markers'],  // Provides markers for downstream features
+    consumes: [],           // Doesn't consume any context
+    layer: 0,               // Base layer (drawn first)
+  },
 };
