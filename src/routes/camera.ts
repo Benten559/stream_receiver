@@ -201,4 +201,74 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
     });
 });
 
+/**
+ * POST /camera/recording/start
+ * Start a new recording session
+ */
+cameraRouter.post('/recording/start', async (req: Request, res: Response) => {
+    try {
+        const session = await cameraService.startRecording();
+        res.json({
+            success: true,
+            session: {
+                sessionId: session.sessionId,
+                sessionPath: session.sessionPath,
+                startTime: session.startTime,
+            },
+        });
+    } catch (error: any) {
+        res.status(400).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * POST /camera/recording/stop
+ * Stop the current recording session
+ */
+cameraRouter.post('/recording/stop', async (req: Request, res: Response) => {
+    try {
+        await cameraService.stopRecording();
+        res.json({
+            success: true,
+            message: 'Recording stopped',
+        });
+    } catch (error: any) {
+        res.status(400).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * GET /camera/recording/status
+ * Get current recording session status
+ */
+cameraRouter.get('/recording/status', (req: Request, res: Response) => {
+    const status = cameraService.getRecordingStatus();
+
+    if (!status) {
+        res.json({
+            isRecording: false,
+        });
+        return;
+    }
+
+    const frameCountsArray = Array.from(status.frameCounters.values()) as number[];
+    const totalFrames = frameCountsArray.reduce((a, b) => a + b, 0);
+
+    res.json({
+        isRecording: status.isRecording,
+        sessionId: status.sessionId,
+        sessionPath: status.sessionPath,
+        startTime: status.startTime,
+        cameras: Array.from(status.cameras),
+        frameCounts: Object.fromEntries(status.frameCounters),
+        totalFrames,
+    });
+});
+
 export default cameraRouter;

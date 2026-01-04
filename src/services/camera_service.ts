@@ -1,5 +1,6 @@
 // src/services/camera_service.ts
 import { RedisManager } from './redis_manager.ts';
+import { FrameRecorder } from './frame_recorder.ts';
 import type { CameraFrame, CameraState } from '../types/camera.types.ts';
 import { initializeConfig } from '../config/index.ts';
 
@@ -9,9 +10,11 @@ export class CameraService {
     private redisManager: RedisManager;
     private cameraStates: Map<string, CameraState> = new Map();
     private frameListeners : Map<string, Set<FrameListener>> = new Map();
+    private frameRecorder: FrameRecorder;
 
     constructor() {
         this.redisManager = new RedisManager();
+        this.frameRecorder = new FrameRecorder();
 
         // Register frame handler
         this.redisManager.onFrame((frame: CameraFrame) => {
@@ -55,6 +58,11 @@ export class CameraService {
         // Update state
         state.latestFrame = frameData;
         state.lastSeen = timestamp;
+
+        // Record frame if recording is active
+        this.frameRecorder.recordFrame(cameraId, frameData).catch(err => {
+            console.error(`Frame recording error for ${cameraId}:`, err);
+        });
 
         // Notify all listeners for this camera
         const listeners = this.frameListeners.get(cameraId);
@@ -136,6 +144,27 @@ export class CameraService {
                 this.frameListeners.delete(cameraId);
             }
         };
+    }
+
+    /**
+     * Start recording frames to disk
+     */
+    async startRecording(): Promise<any> {
+        return await this.frameRecorder.startRecording();
+    }
+
+    /**
+     * Stop recording frames
+     */
+    async stopRecording(): Promise<void> {
+        return await this.frameRecorder.stopRecording();
+    }
+
+    /**
+     * Get current recording status
+     */
+    getRecordingStatus(): any {
+        return this.frameRecorder.getStatus();
     }
 
     /**
