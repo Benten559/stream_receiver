@@ -5,6 +5,7 @@ import { FeatureManager } from './features/feature_manager.js';
 import { fiducialFeature } from './features/fiducial_detection.js';
 import { bulletHoleFeature } from './features/bullet_hole_detection.js';
 import { setupFeatureToggles } from './features/setup_features.js';
+import { setupRecordingControls } from './features/frame_recording_controls.js';
 import type { RawFrame } from './types/streaming.types.js';
 
 // Track OpenCV.js loading status
@@ -118,6 +119,9 @@ function startSSEStream(cameraId: string): void {
     // Setup feature toggle buttons
     setupFeatureToggles(currentFeatureManager);
 
+    // Add recording controls button
+    addRecordingButton();
+
     // Handle connection events
     currentStreamClient.addEventListener('connected', () => {
       console.log(`Connected to camera: ${cameraId}`);
@@ -164,6 +168,23 @@ function cleanupCurrentStream(): void {
   const featureOptions = document.getElementById('feature-options');
   if (featureOptions) {
     featureOptions.innerHTML = '';
+  }
+}
+
+/**
+ * @description Add frame recording button to feature options
+ */
+function addRecordingButton(): void {
+  const recordingBtn = document.createElement('button');
+  recordingBtn.textContent = 'Frame Recording';
+  recordingBtn.className = 'feature-toggle-button';
+  recordingBtn.addEventListener('click', () => {
+    setupRecordingControls();
+  });
+
+  const featureOptions = document.getElementById('feature-options');
+  if (featureOptions) {
+    featureOptions.appendChild(recordingBtn);
   }
 }
 
