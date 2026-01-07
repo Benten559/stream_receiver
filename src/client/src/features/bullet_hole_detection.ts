@@ -33,6 +33,23 @@ interface TrackedHole {
   framesSeen: number; // How many frames this hole has been detected
   framesNotSeen: number; // Consecutive frames without detection
   lastSeen: number; // Frame number when last detected
+  temporalClusterCount: number; // How many times detected in spatial-temporal window
+}
+
+/**
+ * Cached fiducial state for ROI persistence
+ */
+interface CachedFiducialState {
+  roi: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    corners: { x: number; y: number }[];
+    exclusionZones: ExclusionZone[];
+  };
+  lastSeenFrame: number;
+  markerCount: number; // How many markers were used
 }
 
 /**
@@ -45,6 +62,10 @@ interface DetectionState {
   trackedHoles: TrackedHole[]; // Persistent hole tracking
   nextHoleId: number; // ID counter for new holes
   totalFrames: number; // Total frames processed
+  detectionHistory: DetectedHole[][]; // Sliding window of last N frames
+  historyWindowSize: number; // Size of temporal window
+  cachedFiducials: CachedFiducialState | null; // Persistent fiducial ROI
+  fiducialPersistenceFrames: number; // How long to keep cached fiducials
 }
 
 // Module-level state
@@ -59,6 +80,13 @@ const PARAMS: DetectionParams & {
   confidenceSmoothingFactor: number;
   debugMode: boolean;
   debugShowRawBlobs: boolean;
+  // Temporal window parameters
+  temporalWindowSize: number;
+  temporalMatchDistance: number;
+  temporalConfidenceBoost: number;
+  minTemporalClustersForBoost: number;
+  // Fiducial persistence parameters
+  fiducialPersistenceFrames: number;
 } = {
   // Core CV parameters (shared)
   edgeThreshold: 50,
@@ -72,6 +100,15 @@ const PARAMS: DetectionParams & {
   minFramesToConfirm: 2,
   maxFramesNotSeen: 5,
   confidenceSmoothingFactor: 0.3,
+
+  // Temporal window parameters
+  temporalWindowSize: 8, // Keep last 8 frames in history
+  temporalMatchDistance: 25, // Max distance for temporal clustering
+  temporalConfidenceBoost: 15, // Confidence boost per temporal cluster
+  minTemporalClustersForBoost: 3, // Min clusters needed for boost
+
+  // Fiducial persistence
+  fiducialPersistenceFrames: 10, // Keep ROI for 10 frames without fiducials
 
   // Debug visualization
   debugMode: true,
@@ -268,16 +305,15 @@ function drawDetections(
     ctx.lineTo(center.x, center.y + crossSize);
     ctx.stroke();
 
-    // Draw confidence label with hole ID
+    // Draw confidence label with hole ID and temporal info
     ctx.font = 'bold 14px Arial';
     ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(
-      `#${id} ${confidence.toFixed(0)}%`,
-      center.x,
-      center.y + radius + 15
-    );
+    const label = hole.temporalClusterCount > 0
+      ? `#${id} ${confidence.toFixed(0)}% [${hole.temporalClusterCount}]`
+      : `#${id} ${confidence.toFixed(0)}%`;
+    ctx.fillText(label, center.x, center.y + radius + 15);
   });
 }
 
@@ -332,7 +368,7 @@ function drawStatusPanel(
   debugInfo?: BlobDebugInfo | null
 ): void {
   const panelWidth = 280;
-  const panelHeight = PARAMS.debugMode && debugInfo ? 200 : 130;
+  const panelHeight = PARAMS.debugMode && debugInfo ? 250 : 160;
   const padding = 10;
   const lineHeight = 18;
 
@@ -379,6 +415,23 @@ function drawStatusPanel(
   // Frame dimensions
   ctx.fillStyle = holes.length > 0 ? '#00ff00' : '#ffa500';
   ctx.fillText(`Frame: ${width}x${height}`, padding, y);
+  y += lineHeight;
+
+  // Temporal window status
+  const historySize = state?.detectionHistory.length ?? 0;
+  ctx.fillStyle = '#00ffff';
+  ctx.fillText(`Temporal: ${historySize}/${PARAMS.temporalWindowSize} frames`, padding, y);
+  y += lineHeight;
+
+  // Fiducial cache status
+  if (state?.cachedFiducials) {
+    const age = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+    ctx.fillStyle = age === 0 ? '#00ff00' : '#ffff00';
+    ctx.fillText(`Fiducial cache: ${age}f old`, padding, y);
+  } else {
+    ctx.fillStyle = '#888888';
+    ctx.fillText(`Fiducial cache: none`, padding, y);
+  }
   y += lineHeight;
 
   // Debug statistics (if enabled)
@@ -437,6 +490,7 @@ interface ExclusionZone {
 /**
  * Get ROI (Region of Interest) from fiducial markers 0-3 in context
  * Returns bounding box and corner points, or null if markers not available
+ * Now with fiducial persistence - uses cached ROI if markers temporarily lost
  *
  * Marker layout:
  * 0 (top-left) ---- 1 (top-right)
@@ -452,11 +506,27 @@ function getTargetROI(context: Readonly<FeatureContext>): {
   corners: { x: number; y: number }[];
   exclusionZones: ExclusionZone[]; // Exclude marker regions
 } | null {
+  if (!state) return null;
+
   // Read markers from context (provided by fiducial detection)
   const allMarkers = context.markers as DetectedMarker[] | undefined;
 
   if (!allMarkers || allMarkers.length === 0) {
-    console.log('[ROI] No markers in context - processing full frame');
+    // No markers detected - try using cached fiducials
+    if (state.cachedFiducials) {
+      const framesSinceLastSeen = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+      if (framesSinceLastSeen <= PARAMS.fiducialPersistenceFrames) {
+        console.log(
+          `[ROI] Using cached fiducials (${framesSinceLastSeen} frames old, ${state.cachedFiducials.markerCount} markers)`
+        );
+        return state.cachedFiducials.roi;
+      } else {
+        console.log('[ROI] Cached fiducials expired - processing full frame');
+        state.cachedFiducials = null;
+      }
+    } else {
+      console.log('[ROI] No markers in context - processing full frame');
+    }
     return null;
   }
 
@@ -470,6 +540,16 @@ function getTargetROI(context: Readonly<FeatureContext>): {
 
   // Need all 4 markers to define ROI
   if (markersMap.size !== 4) {
+    // Try using cached fiducials if available
+    if (state.cachedFiducials) {
+      const framesSinceLastSeen = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+      if (framesSinceLastSeen <= PARAMS.fiducialPersistenceFrames) {
+        console.log(
+          `[ROI] Only ${markersMap.size}/4 markers - using cached fiducials (${framesSinceLastSeen} frames old)`
+        );
+        return state.cachedFiducials.roi;
+      }
+    }
     console.log(`[ROI] Only ${markersMap.size}/4 markers detected (need 0,1,2,3) - processing full frame`);
     return null;
   }
@@ -514,7 +594,7 @@ function getTargetROI(context: Readonly<FeatureContext>): {
     });
   }
 
-  return {
+  const roi = {
     minX: Math.floor(Math.min(...xs)),
     maxX: Math.ceil(Math.max(...xs)),
     minY: Math.floor(Math.min(...ys)),
@@ -522,6 +602,17 @@ function getTargetROI(context: Readonly<FeatureContext>): {
     corners,
     exclusionZones,
   };
+
+  // Cache this ROI for persistence if markers are lost in future frames
+  if (state) {
+    state.cachedFiducials = {
+      roi,
+      lastSeenFrame: state.totalFrames,
+      markerCount: 4,
+    };
+  }
+
+  return roi;
 }
 
 /**
@@ -553,8 +644,43 @@ function distance(
 }
 
 /**
+ * Analyze temporal persistence of a detection across frame history
+ * Returns boosted confidence and cluster count if hole appears repeatedly in same location
+ */
+function analyzeTemporalPersistence(
+  detection: DetectedHole,
+  history: DetectedHole[][]
+): { boostedConfidence: number; clusterCount: number } {
+  let clusterCount = 0;
+
+  // Count how many frames in history have a detection near this location
+  for (const frameDetections of history) {
+    for (const historicDetection of frameDetections) {
+      const dist = distance(detection.center, historicDetection.center);
+      if (dist <= PARAMS.temporalMatchDistance) {
+        clusterCount++;
+        break; // Only count once per frame
+      }
+    }
+  }
+
+  // Boost confidence if hole appears in multiple frames
+  let boostedConfidence = detection.confidence;
+  if (clusterCount >= PARAMS.minTemporalClustersForBoost) {
+    const boost = Math.min(
+      clusterCount * PARAMS.temporalConfidenceBoost,
+      40 // Cap boost at 40%
+    );
+    boostedConfidence = Math.min(100, detection.confidence + boost);
+  }
+
+  return { boostedConfidence, clusterCount };
+}
+
+/**
  * Update tracked holes with new detections
  * Returns list of confirmed holes to display
+ * Now with temporal analysis - holes appearing in same location across multiple frames get boosted confidence
  */
 function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
   if (!state) {
@@ -566,15 +692,42 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       trackedHoles: [],
       nextHoleId: 0,
       totalFrames: 0,
+      detectionHistory: [],
+      historyWindowSize: PARAMS.temporalWindowSize,
+      cachedFiducials: null,
+      fiducialPersistenceFrames: PARAMS.fiducialPersistenceFrames,
     };
   }
 
   state.totalFrames++;
   const currentFrame = state.totalFrames;
+
+  // Add current detections to history (before temporal analysis)
+  state.detectionHistory.push([...newDetections]);
+
+  // Keep only the last N frames in history (sliding window)
+  if (state.detectionHistory.length > state.historyWindowSize) {
+    state.detectionHistory.shift();
+  }
+
+  // Analyze temporal persistence for each detection and boost confidence
+  const enhancedDetections = newDetections.map((detection) => {
+    const { boostedConfidence, clusterCount } = analyzeTemporalPersistence(
+      detection,
+      state!.detectionHistory.slice(0, -1) // Exclude current frame
+    );
+
+    return {
+      ...detection,
+      confidence: boostedConfidence,
+      temporalClusterCount: clusterCount,
+    };
+  });
+
   const matched = new Set<number>(); // Track which tracked holes were matched
 
-  // Match new detections with existing tracked holes
-  for (const detection of newDetections) {
+  // Match enhanced detections with existing tracked holes
+  for (const detection of enhancedDetections) {
     let bestMatch: TrackedHole | null = null;
     let bestDistance = Infinity;
 
@@ -594,7 +747,7 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       // Update existing tracked hole
       matched.add(bestMatch.id);
 
-      // Smooth confidence using exponential moving average
+      // Smooth confidence using exponential moving average (with temporal boost)
       const alpha = PARAMS.confidenceSmoothingFactor;
       bestMatch.confidence =
         alpha * detection.confidence + (1 - alpha) * bestMatch.confidence;
@@ -603,6 +756,9 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       bestMatch.center.x = alpha * detection.center.x + (1 - alpha) * bestMatch.center.x;
       bestMatch.center.y = alpha * detection.center.y + (1 - alpha) * bestMatch.center.y;
       bestMatch.radius = alpha * detection.radius + (1 - alpha) * bestMatch.radius;
+
+      // Update temporal cluster count
+      bestMatch.temporalClusterCount = detection.temporalClusterCount;
 
       // Reset tracking counters
       bestMatch.framesSeen++;
@@ -618,6 +774,7 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
         framesSeen: 1,
         framesNotSeen: 0,
         lastSeen: currentFrame,
+        temporalClusterCount: detection.temporalClusterCount,
       });
     }
   }
@@ -630,9 +787,18 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
   }
 
   // Remove holes that haven't been seen for too long
-  state.trackedHoles = state.trackedHoles.filter(
-    (hole) => hole.framesNotSeen <= PARAMS.maxFramesNotSeen
-  );
+  // Holes with high temporal cluster counts persist longer (likely real holes)
+  state.trackedHoles = state.trackedHoles.filter((hole) => {
+    let maxFramesNotSeen = PARAMS.maxFramesNotSeen;
+
+    // Boost persistence for holes with strong temporal evidence
+    if (hole.temporalClusterCount >= PARAMS.minTemporalClustersForBoost) {
+      // Allow 2x persistence for temporally confirmed holes
+      maxFramesNotSeen *= 2;
+    }
+
+    return hole.framesNotSeen <= maxFramesNotSeen;
+  });
 
   // Return only confirmed holes (seen for minimum frames)
   return state.trackedHoles.filter(
@@ -653,6 +819,10 @@ function updateFPS(): void {
       trackedHoles: [],
       nextHoleId: 0,
       totalFrames: 0,
+      detectionHistory: [],
+      historyWindowSize: PARAMS.temporalWindowSize,
+      cachedFiducials: null,
+      fiducialPersistenceFrames: PARAMS.fiducialPersistenceFrames,
     };
     return;
   }
@@ -833,6 +1003,27 @@ function createControlPanel(): HTMLElement {
       <input type="range" id="ctrl-confidenceSmoothingFactor" min="0.1" max="0.9" value="${PARAMS.confidenceSmoothingFactor}" step="0.05">
     </div>
 
+    <div class="control-group">
+      <h4 style="color: #00ccff; margin: 10px 0 5px 0;">🕰️ Temporal Analysis</h4>
+
+      <label>Window Size: <span id="val-temporalWindowSize">${PARAMS.temporalWindowSize}</span> frames</label>
+      <input type="range" id="ctrl-temporalWindowSize" min="3" max="15" value="${PARAMS.temporalWindowSize}" step="1">
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">History for time-series analysis</div>
+
+      <label>Match Distance: <span id="val-temporalMatchDistance">${PARAMS.temporalMatchDistance}</span>px</label>
+      <input type="range" id="ctrl-temporalMatchDistance" min="10" max="50" value="${PARAMS.temporalMatchDistance}" step="1">
+
+      <label>Confidence Boost: <span id="val-temporalConfidenceBoost">${PARAMS.temporalConfidenceBoost}</span>%</label>
+      <input type="range" id="ctrl-temporalConfidenceBoost" min="5" max="30" value="${PARAMS.temporalConfidenceBoost}" step="1">
+
+      <label>Min Clusters: <span id="val-minTemporalClustersForBoost">${PARAMS.minTemporalClustersForBoost}</span></label>
+      <input type="range" id="ctrl-minTemporalClustersForBoost" min="2" max="10" value="${PARAMS.minTemporalClustersForBoost}" step="1">
+
+      <label>Fiducial Persist: <span id="val-fiducialPersistenceFrames">${PARAMS.fiducialPersistenceFrames}</span> frames</label>
+      <input type="range" id="ctrl-fiducialPersistenceFrames" min="5" max="30" value="${PARAMS.fiducialPersistenceFrames}" step="1">
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">Keep ROI when markers lost</div>
+    </div>
+
     <style>
       #bullet-hole-controls label {
         display: block;
@@ -877,6 +1068,18 @@ function updateParam(paramName: keyof typeof PARAMS, value: number): void {
     // Format based on parameter type
     const isDecimal = paramName.includes('Factor') || paramName.includes('Circularity') || paramName.includes('Compactness');
     valueSpan.textContent = value.toFixed(isDecimal ? 2 : 0);
+  }
+
+  // Update state if temporal window size changed
+  if (paramName === 'temporalWindowSize' && state) {
+    state.historyWindowSize = value;
+    console.log(`Updated temporal window size to ${value} frames`);
+  }
+
+  // Update state if fiducial persistence changed
+  if (paramName === 'fiducialPersistenceFrames' && state) {
+    state.fiducialPersistenceFrames = value;
+    console.log(`Updated fiducial persistence to ${value} frames`);
   }
 
   console.log(`Updated ${paramName} to ${value}`);
@@ -957,6 +1160,11 @@ export function setupBulletHoleControls(): void {
     'minFramesToConfirm',
     'maxFramesNotSeen',
     'confidenceSmoothingFactor',
+    'temporalWindowSize',
+    'temporalMatchDistance',
+    'temporalConfidenceBoost',
+    'minTemporalClustersForBoost',
+    'fiducialPersistenceFrames',
   ];
 
   paramKeys.forEach((key) => {
