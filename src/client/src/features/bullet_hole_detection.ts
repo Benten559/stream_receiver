@@ -1,25 +1,26 @@
 /**
  * Bullet Hole Detection Feature
  *
- * Detects circular bullet holes in target images using custom computer vision:
+ * Detects circular bullet holes in target images using shared CV algorithms:
  * 1. Sobel Edge Detection - Fast edge detection
  * 2. Connected Components - Flood fill to find blobs
  * 3. Shape Analysis - Circularity and compactness filtering
  *
- * Fast, optimized algorithm designed for real-time performance.
+ * Now uses shared cross-platform CV modules for consistency with Deno notebooks.
  */
 
 import type { Feature, FeatureProcessor, FeatureContext } from '../types/streaming.types.js';
 import type { DetectedMarker } from './fiducial_detection.js';
 
+// Shared CV algorithms and types
+import type { DetectedHole as SharedDetectedHole, DetectionParams } from '../../../shared/cv/types.ts';
+import { detectBulletHoles, sobelEdgeDetection, findConnectedComponents, analyzeShape } from '../../../shared/cv/index.ts';
+import { canvasToGrayscale } from '../utils/canvas_adapter.ts';
+
 /**
- * Detected bullet hole from blob detection
+ * Detected bullet hole (re-export shared type for convenience)
  */
-interface DetectedHole {
-  center: { x: number; y: number };
-  radius: number;
-  confidence: number; // 0-100 (based on blob properties)
-}
+type DetectedHole = SharedDetectedHole;
 
 /**
  * Tracked hole with temporal persistence
@@ -50,230 +51,32 @@ interface DetectionState {
 let state: DetectionState | null = null;
 
 // Detection parameters (tunable)
-const PARAMS = {
-  // Edge Detection (Sobel)
-  edgeThreshold: 50, // 0-255, lower = more sensitive to edges
+const PARAMS: DetectionParams & {
+  // Additional browser-specific tracking parameters
+  matchDistanceThreshold: number;
+  minFramesToConfirm: number;
+  maxFramesNotSeen: number;
+  confidenceSmoothingFactor: number;
+  debugMode: boolean;
+  debugShowRawBlobs: boolean;
+} = {
+  // Core CV parameters (shared)
+  edgeThreshold: 50,
+  minBlobSize: 10,
+  maxBlobSize: 2000,
+  minCircularity: 0.4,
+  minCompactness: 0.3,
 
-  // Blob Size Constraints
-  minBlobSize: 10, // Minimum blob area in pixels²
-  maxBlobSize: 2000, // Maximum blob area in pixels²
-
-  // Shape Analysis
-  minCircularity: 0.4, // 0-1, how circular the blob must be (4πA/P²)
-  minCompactness: 0.3, // 0-1, how compact the blob is (A/BoundingBoxArea)
-
-  // Temporal tracking parameters
-  matchDistanceThreshold: 20, // pixels - max distance to match holes between frames
-  minFramesToConfirm: 2, // Frames a hole must be seen before displaying
-  maxFramesNotSeen: 5, // Frames without detection before removing hole
-  confidenceSmoothingFactor: 0.3, // 0-1, lower = more smoothing (exponential moving average)
+  // Browser-specific temporal tracking parameters
+  matchDistanceThreshold: 20,
+  minFramesToConfirm: 2,
+  maxFramesNotSeen: 5,
+  confidenceSmoothingFactor: 0.3,
 
   // Debug visualization
-  debugMode: true, // Show detected blobs before filtering
-  debugShowRawBlobs: true, // Show ALL blobs before ROI/exclusion filtering
+  debugMode: true,
+  debugShowRawBlobs: true,
 };
-
-/**
- * Sobel Edge Detection
- * Applies Sobel operator to detect edges in grayscale image
- */
-function sobelEdgeDetection(
-  imageData: ImageData,
-  threshold: number
-): Uint8ClampedArray {
-  const width = imageData.width;
-  const height = imageData.height;
-  const data = imageData.data;
-
-  // Convert to grayscale
-  const gray = new Uint8ClampedArray(width * height);
-  for (let i = 0; i < width * height; i++) {
-    const r = data[i * 4] ?? 0;
-    const g = data[i * 4 + 1] ?? 0;
-    const b = data[i * 4 + 2] ?? 0;
-    gray[i] = Math.floor(0.299 * r + 0.587 * g + 0.114 * b);
-  }
-
-  // Sobel kernels
-  const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
-  const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
-
-  // Edge magnitude array
-  const edges = new Uint8ClampedArray(width * height);
-
-  // Apply Sobel operator
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      let gx = 0;
-      let gy = 0;
-
-      // 3x3 convolution
-      for (let ky = -1; ky <= 1; ky++) {
-        for (let kx = -1; kx <= 1; kx++) {
-          const idx = (y + ky) * width + (x + kx);
-          const kernelIdx = (ky + 1) * 3 + (kx + 1);
-          gx += (gray[idx] ?? 0) * (sobelX[kernelIdx] ?? 0);
-          gy += (gray[idx] ?? 0) * (sobelY[kernelIdx] ?? 0);
-        }
-      }
-
-      // Gradient magnitude
-      const magnitude = Math.sqrt(gx * gx + gy * gy);
-      edges[y * width + x] = magnitude > threshold ? 255 : 0;
-    }
-  }
-
-  return edges;
-}
-
-/**
- * Blob data structure for connected components
- */
-interface Blob {
-  pixels: { x: number; y: number }[];
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-}
-
-/**
- * Connected Components using Flood Fill
- * Finds all connected regions in binary edge image
- */
-function findConnectedComponents(
-  edges: Uint8ClampedArray,
-  width: number,
-  height: number
-): Blob[] {
-  const visited = new Uint8Array(width * height);
-  const blobs: Blob[] = [];
-
-  // Flood fill from a seed point
-  function floodFill(startX: number, startY: number): Blob | null {
-    const stack: { x: number; y: number }[] = [{ x: startX, y: startY }];
-    const blob: Blob = {
-      pixels: [],
-      minX: startX,
-      maxX: startX,
-      minY: startY,
-      maxY: startY,
-    };
-
-    while (stack.length > 0) {
-      const { x, y } = stack.pop()!;
-
-      // Bounds check
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
-
-      const idx = y * width + x;
-
-      // Skip if already visited or not an edge
-      if (visited[idx] || !edges[idx]) continue;
-
-      // Mark as visited
-      visited[idx] = 1;
-
-      // Add to blob
-      blob.pixels.push({ x, y });
-
-      // Update bounding box
-      blob.minX = Math.min(blob.minX, x);
-      blob.maxX = Math.max(blob.maxX, x);
-      blob.minY = Math.min(blob.minY, y);
-      blob.maxY = Math.max(blob.maxY, y);
-
-      // Add neighbors (4-connectivity)
-      stack.push({ x: x + 1, y });
-      stack.push({ x: x - 1, y });
-      stack.push({ x, y: y + 1 });
-      stack.push({ x, y: y - 1 });
-    }
-
-    return blob.pixels.length > 0 ? blob : null;
-  }
-
-  // Find all connected components
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      if (edges[idx] && !visited[idx]) {
-        const blob = floodFill(x, y);
-        if (blob) {
-          blobs.push(blob);
-        }
-      }
-    }
-  }
-
-  return blobs;
-}
-
-/**
- * Shape Analysis - Calculate circularity and compactness
- */
-function analyzeShape(blob: Blob): {
-  area: number;
-  perimeter: number;
-  circularity: number;
-  compactness: number;
-  centerX: number;
-  centerY: number;
-  radius: number;
-} {
-  const area = blob.pixels.length;
-
-  // Calculate perimeter (count edge pixels)
-  let perimeter = 0;
-  const pixelSet = new Set(blob.pixels.map((p) => `${p.x},${p.y}`));
-
-  for (const pixel of blob.pixels) {
-    const { x, y } = pixel;
-    // Check 4-neighbors
-    const neighbors = [
-      `${x + 1},${y}`,
-      `${x - 1},${y}`,
-      `${x},${y + 1}`,
-      `${x},${y - 1}`,
-    ];
-    // If any neighbor is not in blob, this is a perimeter pixel
-    if (neighbors.some((n) => !pixelSet.has(n))) {
-      perimeter++;
-    }
-  }
-
-  // Circularity: 4π * Area / Perimeter² (1.0 = perfect circle)
-  const circularity =
-    perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0;
-
-  // Compactness: Area / Bounding Box Area
-  const boundingBoxArea =
-    (blob.maxX - blob.minX + 1) * (blob.maxY - blob.minY + 1);
-  const compactness = boundingBoxArea > 0 ? area / boundingBoxArea : 0;
-
-  // Center of mass
-  let centerX = 0;
-  let centerY = 0;
-  for (const pixel of blob.pixels) {
-    centerX += pixel.x;
-    centerY += pixel.y;
-  }
-  centerX /= area;
-  centerY /= area;
-
-  // Approximate radius from area (assuming circle)
-  const radius = Math.sqrt(area / Math.PI);
-
-  return {
-    area,
-    perimeter,
-    circularity,
-    compactness,
-    centerX,
-    centerY,
-    radius,
-  };
-}
 
 /**
  * Debug info for blob detection
@@ -295,7 +98,7 @@ export function getLastDebugInfo(): BlobDebugInfo | null {
 }
 
 /**
- * Detect blobs (bullet holes) in image using custom computer vision
+ * Detect blobs (bullet holes) in image using shared CV algorithms
  */
 function detectBlobs(
   imageData: ImageData,
@@ -345,109 +148,89 @@ function detectBlobs(
       );
     }
 
-    // 1. Sobel Edge Detection
-    const edges = sobelEdgeDetection(processImageData, PARAMS.edgeThreshold);
+    // Use shared CV pipeline:
+    // 1. Convert Canvas ImageData to grayscale
+    const gray = canvasToGrayscale(processImageData);
 
-    // 2. Connected Components
-    const blobs = findConnectedComponents(
-      edges,
+    // 2. Apply shared detection pipeline
+    const detectedHoles = detectBulletHoles(
+      gray,
       processImageData.width,
-      processImageData.height
+      processImageData.height,
+      PARAMS
     );
 
     console.log(
-      `[BlobDetect] Found ${blobs.length} connected components (edge threshold=${PARAMS.edgeThreshold})`
+      `[BlobDetect] Shared CV pipeline detected ${detectedHoles.length} holes`
     );
 
-    // Debug tracking
+    // Debug tracking: Get raw blobs for visualization
     const rawBlobs: { x: number; y: number; radius: number }[] = [];
     let afterROICount = 0;
     let afterExclusionCount = 0;
-    let afterShapeCount = 0;
 
-    // 3. Shape Analysis and Filtering
-    const holes: DetectedHole[] = [];
-    for (const blob of blobs) {
-      const shape = analyzeShape(blob);
+    // For debug visualization, re-run edge detection and blob finding
+    if (PARAMS.debugMode && PARAMS.debugShowRawBlobs) {
+      const edges = sobelEdgeDetection(gray, processImageData.width, processImageData.height, PARAMS.edgeThreshold);
+      const blobs = findConnectedComponents(edges, processImageData.width, processImageData.height);
 
-      // Adjust coordinates back to full frame
-      const centerX = shape.centerX + offsetX;
-      const centerY = shape.centerY + offsetY;
-
-      // Track raw blobs for debug
-      rawBlobs.push({ x: centerX, y: centerY, radius: shape.radius });
-
-      // Filter by blob size
-      if (
-        shape.area < PARAMS.minBlobSize ||
-        shape.area > PARAMS.maxBlobSize
-      ) {
-        continue;
+      for (const blob of blobs) {
+        const shape = analyzeShape(blob);
+        const centerX = shape.centerX + offsetX;
+        const centerY = shape.centerY + offsetY;
+        rawBlobs.push({ x: centerX, y: centerY, radius: shape.radius });
       }
-      afterShapeCount++;
+    }
+
+    // Apply ROI and exclusion filtering to detected holes
+    const filteredHoles: DetectedHole[] = [];
+
+    for (const hole of detectedHoles) {
+      // Adjust coordinates back to full frame
+      const centerX = hole.center.x + offsetX;
+      const centerY = hole.center.y + offsetY;
+
+      // Track for debug
+      afterROICount++;
 
       // Skip if outside ROI quadrilateral
       if (roi && !isPointInQuad(centerX, centerY, roi.corners)) {
         continue;
       }
-      afterROICount++;
 
       // Skip if inside exclusion zone (fiducial marker)
       if (roi && isInExclusionZone(centerX, centerY, roi.exclusionZones)) {
         continue;
       }
+
       afterExclusionCount++;
 
-      // Filter by circularity
-      if (shape.circularity < PARAMS.minCircularity) {
-        continue;
-      }
-
-      // Filter by compactness
-      if (shape.compactness < PARAMS.minCompactness) {
-        continue;
-      }
-
-      // Confidence based on shape quality (combination of circularity and compactness)
-      const confidence = Math.min(
-        100,
-        ((shape.circularity + shape.compactness) / 2) * 100
-      );
-
-      holes.push({
+      filteredHoles.push({
         center: { x: centerX, y: centerY },
-        radius: shape.radius,
-        confidence,
+        radius: hole.radius,
+        confidence: hole.confidence,
+        metrics: hole.metrics,
       });
     }
 
     // Store debug info
     lastDebugInfo = {
-      rawBlobCount: blobs.length,
+      rawBlobCount: rawBlobs.length,
       afterROICount,
       afterExclusionCount,
       rawBlobs,
     };
 
     console.log(
-      `[BlobDetect] Filtering: ${blobs.length} raw → ${afterShapeCount} after shape → ${afterROICount} after ROI → ${afterExclusionCount} after exclusion → ${holes.length} final holes (circ>=${PARAMS.minCircularity}, compact>=${PARAMS.minCompactness})`
+      `[BlobDetect] Filtering: ${detectedHoles.length} detected → ${afterROICount} after ROI → ${afterExclusionCount} final holes`
     );
 
-    return holes;
+    return filteredHoles;
   } catch (error) {
     console.error('Blob detection failed:', error);
     return [];
   }
 }
-
-/**
- * Custom Computer Vision Approach:
- * 1. Sobel Edge Detection - Fast, simple edge detection
- * 2. Connected Components - Flood fill to find blob regions
- * 3. Shape Analysis - Circularity and compactness filtering
- *
- * No FFT (too slow), no OpenCV dependency
- */
 
 /**
  * Draw detected holes on canvas
@@ -913,7 +696,7 @@ const bulletHoleProcessor: FeatureProcessor = (
     // 1. Get ROI from context (markers provided by fiducial detection)
     const roi = getTargetROI(context);
 
-    // 2. Detect blobs (bullet holes)
+    // 2. Detect blobs (bullet holes) using shared CV modules
     const currentDetections = detectBlobs(sourceImageData, roi ?? undefined);
 
     // 3. Update temporal tracking and get confirmed holes
