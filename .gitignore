@@ -173,3 +173,7 @@ app/logs/
 *.wsgi
 deployment/
 server_config_files/
+
+
+# Frame recorder default path
+data/
