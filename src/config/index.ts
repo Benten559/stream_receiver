@@ -1,4 +1,4 @@
-interface AppConfig {
+export interface AppConfig {
     redis: {
         host: string;
         port: number;
@@ -9,6 +9,9 @@ interface AppConfig {
     };
     camera: {
         unsubscribeDelay: number;  // Seconds to wait before unsubscribing
+    };
+    recording: {
+        savePath: string;  // Base directory for frame storage
     };
 }
 
@@ -24,6 +27,9 @@ export const initializeConfig = (): AppConfig => {
         },
         camera: {
             unsubscribeDelay: parseInt(process.env.UNSUBSCRIBE_DELAY || '30', 10),
+        },
+        recording: {
+            savePath: process.env.FRAME_SAVE_PATH || './data/frames',
         },
     };
 };

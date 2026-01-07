@@ -2,10 +2,19 @@ import type { AvailableCamerasResponse } from '../../types/api.types.js';
 import { SSEStreamClient } from './streaming/sse_client.js';
 import { CanvasRenderer } from './streaming/canvas_renderer.js';
 import { FeatureManager } from './features/feature_manager.js';
-import { duplicateFeature } from './features/duplicate_stream.js';
-import { fftFeature } from './features/fft_stream.js';
+import { fiducialFeature } from './features/fiducial_detection.js';
+import { bulletHoleFeature } from './features/bullet_hole_detection.js';
 import { setupFeatureToggles } from './features/setup_features.js';
+import { setupRecordingControls } from './features/frame_recording_controls.js';
 import type { RawFrame } from './types/streaming.types.js';
+
+// Track OpenCV.js loading status
+let openCvReady = false;
+
+window.addEventListener('opencv-ready', () => {
+  openCvReady = true;
+  console.log('OpenCV.js ready for fiducial detection');
+});
 
 // Track current stream
 let currentStreamClient: SSEStreamClient | null = null;
@@ -75,6 +84,10 @@ function startSSEStream(cameraId: string): void {
     return;
   }
 
+  if (!openCvReady) {
+    console.warn('OpenCV.js still loading, fiducial detection may not work immediately');
+  }
+
   // Cleanup previous stream
   cleanupCurrentStream();
 
@@ -100,11 +113,14 @@ function startSSEStream(cameraId: string): void {
     );
 
     // Register available features
-    currentFeatureManager.registerFeature(duplicateFeature);
-    currentFeatureManager.registerFeature(fftFeature);
+    currentFeatureManager.registerFeature(fiducialFeature);
+    currentFeatureManager.registerFeature(bulletHoleFeature);
 
     // Setup feature toggle buttons
     setupFeatureToggles(currentFeatureManager);
+
+    // Add recording controls button
+    addRecordingButton();
 
     // Handle connection events
     currentStreamClient.addEventListener('connected', () => {
@@ -152,6 +168,23 @@ function cleanupCurrentStream(): void {
   const featureOptions = document.getElementById('feature-options');
   if (featureOptions) {
     featureOptions.innerHTML = '';
+  }
+}
+
+/**
+ * @description Add frame recording button to feature options
+ */
+function addRecordingButton(): void {
+  const recordingBtn = document.createElement('button');
+  recordingBtn.textContent = 'Frame Recording';
+  recordingBtn.className = 'feature-toggle-button';
+  recordingBtn.addEventListener('click', () => {
+    setupRecordingControls();
+  });
+
+  const featureOptions = document.getElementById('feature-options');
+  if (featureOptions) {
+    featureOptions.appendChild(recordingBtn);
   }
 }
 
