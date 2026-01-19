@@ -59,6 +59,18 @@ export interface DetectionParams {
     // Shape Analysis
     minCircularity: number;     // 0-1
     minCompactness: number;     // 0-1
+
+    // Advanced Detection (optional)
+    useContrastEnhancement?: boolean;  // Enable CLAHE-like preprocessing
+    contrastTileSize?: number;         // Tile size for local contrast (default: 32)
+    useLoGDetection?: boolean;         // Enable Laplacian of Gaussian blob detection
+    logSigma?: number;                 // LoG Gaussian sigma (default: 1.5)
+    logThreshold?: number;             // LoG threshold (default: 10)
+
+    // Background Subtraction (optional)
+    useBackgroundSubtraction?: boolean; // Enable reference-based difference detection
+    differenceThreshold?: number;       // Minimum pixel change to detect (default: 20)
+    cleanNoise?: boolean;               // Apply morphological cleaning (default: true)
 }
 
 /**

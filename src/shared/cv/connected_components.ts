@@ -10,12 +10,14 @@ import type { Blob, Point } from './types.ts';
  * @param edges - Binary edge map (0 or 255)
  * @param width - Image width
  * @param height - Image height
+ * @param maxBlobs - Maximum blobs to find before bailing out (default: 200)
  * @returns Array of blobs (connected components)
  */
 export function findConnectedComponents(
-    edges: Uint8ClampedArray,
+    edges: Uint8Array | Uint8ClampedArray,
     width: number,
-    height: number
+    height: number,
+    maxBlobs: number = 200
 ): Blob[] {
     const visited = new Uint8Array(width * height);
     const blobs: Blob[] = [];
@@ -78,6 +80,12 @@ export function findConnectedComponents(
                 const blob = floodFill(x, y);
                 if (blob) {
                     blobs.push(blob);
+
+                    // Early bailout if too many blobs (likely noise)
+                    if (blobs.length >= maxBlobs) {
+                        console.warn(`[ConnectedComponents] Bailed out after finding ${maxBlobs} blobs (likely noisy image)`);
+                        return blobs;
+                    }
                 }
             }
         }
