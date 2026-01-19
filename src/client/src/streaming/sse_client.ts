@@ -13,6 +13,9 @@ export class SSEStreamClient extends EventTarget {
   private reconnectTimer: number | null = null;
   private isManualDisconnect: boolean = false;
 
+  // Frame stats
+  private frameCount: number = 0;
+
   constructor(cameraId: string) {
     super();
     this.cameraId = cameraId;
@@ -103,8 +106,18 @@ export class SSEStreamClient extends EventTarget {
       const base64Data = event.data;
 
       if (!base64Data || typeof base64Data !== 'string') {
-        console.error('Invalid frame data received');
+        console.error('[SSE] Invalid frame data received:', typeof base64Data);
         return;
+      }
+
+      this.frameCount++;
+
+      // Validate base64 JPEG data (only log warnings occasionally)
+      if (!base64Data.startsWith('/9j/') && this.frameCount % 50 === 0) {
+        console.warn(
+          `[SSE] Frame data doesn't look like JPEG base64. ` +
+          `Length: ${base64Data.length}, Start: ${base64Data.substring(0, 20)}...`
+        );
       }
 
       const rawFrame: RawFrame = {
@@ -116,7 +129,7 @@ export class SSEStreamClient extends EventTarget {
       const frameEvent = new CustomEvent('frame', { detail: rawFrame });
       this.dispatchEvent(frameEvent);
     } catch (error) {
-      console.error('Error processing frame:', error);
+      console.error('[SSE] Error processing frame:', error);
     }
   }
 

@@ -22,6 +22,12 @@ export class FeatureManager {
   // Event handling
   private frameHandler: ((event: Event) => void) | null = null;
 
+  // Frame dropping (prevent queue backlog)
+  private isProcessing: boolean = false;
+  private droppedFrames: number = 0;
+  private processedFrames: number = 0;
+  private lastStatsLog: number = Date.now();
+
   constructor(streamClient: SSEStreamClient, cameraId: string, originalRenderer: CanvasRenderer) {
     this.streamClient = streamClient;
     this.cameraId = cameraId;
@@ -136,10 +142,31 @@ export class FeatureManager {
 
   /**
    * Handle incoming frame from SSE
+   * IMPORTANT: Drops frames if already processing OR if frame is too old (prevent lag)
    */
   private async handleIncomingFrame(event: Event): Promise<void> {
     const customEvent = event as CustomEvent<RawFrame>;
     const rawFrame = customEvent.detail;
+
+    // DROP FRAME if already processing previous frame (prevent queue buildup!)
+    if (this.isProcessing) {
+      this.droppedFrames++;
+      this.logDropStats();
+      return;
+    }
+
+    // DROP FRAME if too old (prevent displaying stale frames)
+    const frameAge = Date.now() - rawFrame.timestamp;
+    if (frameAge > 500) {  // Drop frames older than 500ms
+      this.droppedFrames++;
+      if (frameAge > 1000 && this.droppedFrames % 10 === 0) {
+        console.warn(`[FrameManager] Dropping old frames! Age: ${frameAge}ms - processing too slow!`);
+      }
+      this.logDropStats();
+      return;
+    }
+
+    this.isProcessing = true;
 
     try {
       // Decode frame once
@@ -150,8 +177,35 @@ export class FeatureManager {
 
       // Process all active features
       await this.processFeatures(imageData);
+
+      this.processedFrames++;
+      this.logDropStats();
     } catch (error) {
       console.error('Failed to process frame:', error);
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * Log frame drop statistics every 5 seconds
+   */
+  private logDropStats(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastStatsLog;
+
+    if (elapsed >= 5000) { // Log every 5 seconds
+      const total = this.processedFrames + this.droppedFrames;
+      const dropRate = total > 0 ? ((this.droppedFrames / total) * 100).toFixed(1) : '0.0';
+
+      console.log(
+        `[FrameStats] Processed: ${this.processedFrames}, Dropped: ${this.droppedFrames} (${dropRate}% drop rate)`
+      );
+
+      // Reset counters
+      this.processedFrames = 0;
+      this.droppedFrames = 0;
+      this.lastStatsLog = now;
     }
   }
 
@@ -270,6 +324,11 @@ export class FeatureManager {
       this.sharedCanvasRenderer = null;
       this.sharedCanvas = null;
     }
+
+    // Reset frame stats
+    this.isProcessing = false;
+    this.droppedFrames = 0;
+    this.processedFrames = 0;
 
     this.features.clear();
   }
