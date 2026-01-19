@@ -14,8 +14,23 @@ import type { DetectedMarker } from './fiducial_detection.js';
 
 // Shared CV algorithms and types
 import type { DetectedHole as SharedDetectedHole, DetectionParams } from '../../../shared/cv/types.ts';
-import { detectBulletHoles, sobelEdgeDetection, findConnectedComponents, analyzeShape } from '../../../shared/cv/index.ts';
-import { canvasToGrayscale } from '../utils/canvas_adapter.ts';
+import {
+  detectBulletHoles,
+  detectBulletHolesCV,
+  isOpenCVReady,
+  sobelEdgeDetection,
+  findConnectedComponents,
+  analyzeShape
+} from '../../../shared/cv/index.ts';
+import {
+  canvasToGrayscale,
+  canvasToGrayscaleMat,
+  downscaleGrayscale,
+  downscaleMat
+} from '../utils/canvas_adapter.ts';
+
+// OpenCV types global
+declare const cv: any;
 
 /**
  * Detected bullet hole (re-export shared type for convenience)
@@ -33,6 +48,23 @@ interface TrackedHole {
   framesSeen: number; // How many frames this hole has been detected
   framesNotSeen: number; // Consecutive frames without detection
   lastSeen: number; // Frame number when last detected
+  temporalClusterCount: number; // How many times detected in spatial-temporal window
+}
+
+/**
+ * Cached fiducial state for ROI persistence
+ */
+interface CachedFiducialState {
+  roi: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    corners: { x: number; y: number }[];
+    exclusionZones: ExclusionZone[];
+  };
+  lastSeenFrame: number;
+  markerCount: number; // How many markers were used
 }
 
 /**
@@ -45,6 +77,18 @@ interface DetectionState {
   trackedHoles: TrackedHole[]; // Persistent hole tracking
   nextHoleId: number; // ID counter for new holes
   totalFrames: number; // Total frames processed
+  detectionHistory: DetectedHole[][]; // Sliding window of last N frames
+  historyWindowSize: number; // Size of temporal window
+  cachedFiducials: CachedFiducialState | null; // Persistent fiducial ROI
+  fiducialPersistenceFrames: number; // How long to keep cached fiducials
+  referenceFrame: Uint8Array | Uint8ClampedArray | null; // Reference frame for background subtraction
+  latestSourceImage: ImageData | null; // Latest source image for reference capture
+  skipCounter: number; // Frame skip counter for performance
+  lastProcessedHoles: TrackedHole[]; // Last processed holes (for skipped frames)
+  // Scale calibration from fiducials
+  pixelsPerMM: number | null; // Pixels per millimeter (from 150mm fiducials)
+  calibratedMinHoleSize: number | null; // Min hole size in pixels (calibrated from scale)
+  calibratedMaxHoleSize: number | null; // Max hole size in pixels (calibrated from scale)
 }
 
 // Module-level state
@@ -59,23 +103,58 @@ const PARAMS: DetectionParams & {
   confidenceSmoothingFactor: number;
   debugMode: boolean;
   debugShowRawBlobs: boolean;
+  // Temporal window parameters
+  temporalWindowSize: number;
+  temporalMatchDistance: number;
+  temporalConfidenceBoost: number;
+  minTemporalClustersForBoost: number;
+  // Fiducial persistence parameters
+  fiducialPersistenceFrames: number;
+  // Performance parameters
+  processingScale: number;
+  frameSkip: number;
 } = {
   // Core CV parameters (shared)
   edgeThreshold: 50,
-  minBlobSize: 10,
-  maxBlobSize: 2000,
-  minCircularity: 0.4,
-  minCompactness: 0.3,
+  minBlobSize: 5, // Reduced from 10 to catch smaller holes
+  maxBlobSize: 5000, // Increased from 2000 for larger potential detections
+  minCircularity: 0.25, // Reduced from 0.4 - holes at angles aren't perfectly circular
+  minCompactness: 0.2, // Reduced from 0.3 - accept less compact shapes
+
+  // Advanced detection (NEW - multi-method detection)
+  useContrastEnhancement: false, // DISABLED by default - enable in UI if needed
+  contrastTileSize: 32, // Tile size for local contrast normalization
+  useLoGDetection: false, // DISABLED by default - enable in UI if needed
+  logSigma: 1.5, // LoG Gaussian blur sigma
+  logThreshold: 10, // LoG response threshold
+
+  // Background Subtraction (BEST method - target agnostic)
+  useBackgroundSubtraction: true, // Enable by default when reference captured
+  differenceThreshold: 15, // Reduced from 20 - more sensitive to smaller changes
+  cleanNoise: false, // Apply morphological noise cleaning (DISABLED for performance - 5M ops/frame!)
 
   // Browser-specific temporal tracking parameters
   matchDistanceThreshold: 20,
-  minFramesToConfirm: 2,
-  maxFramesNotSeen: 5,
+  minFramesToConfirm: 1, // Reduced from 2 (BG sub is already accurate)
+  maxFramesNotSeen: 3, // Reduced from 5 for faster cleanup
   confidenceSmoothingFactor: 0.3,
 
+  // Temporal window parameters
+  temporalWindowSize: 3, // Keep last 3 frames in history (reduced from 5 for performance)
+  temporalMatchDistance: 25, // Max distance for temporal clustering
+  temporalConfidenceBoost: 15, // Confidence boost per temporal cluster
+  minTemporalClustersForBoost: 2, // Min clusters needed for boost (reduced from 3)
+
+  // Fiducial persistence
+  fiducialPersistenceFrames: 10, // Keep ROI for 10 frames without fiducials
+
+  // PERFORMANCE CRITICAL SETTINGS
+  processingScale: 4, // Downscale factor (4 = 1/4 size = 16x fewer pixels! 1920x1080 → 480x270)
+  frameSkip: 0, // Process every Nth frame (0 = process all, 1 = every other, 2 = every 3rd)
+
   // Debug visualization
-  debugMode: true,
-  debugShowRawBlobs: true,
+  debugMode: false, // DISABLED for performance
+  debugShowRawBlobs: false, // DISABLED for performance
 };
 
 /**
@@ -98,7 +177,8 @@ export function getLastDebugInfo(): BlobDebugInfo | null {
 }
 
 /**
- * Detect blobs (bullet holes) in image using shared CV algorithms
+ * Detect blobs (bullet holes) using OpenCV.js optimized pipeline (FAST!)
+ * 5-10x faster than custom JavaScript implementation
  */
 function detectBlobs(
   imageData: ImageData,
@@ -111,23 +191,32 @@ function detectBlobs(
     exclusionZones: ExclusionZone[];
   }
 ): DetectedHole[] {
+  // Fallback to legacy implementation if OpenCV not ready
+  if (!isOpenCVReady()) {
+    console.warn('[BlobDetect] OpenCV.js not ready - using legacy JS implementation (slow)');
+    return detectBlobsLegacy(imageData, roi);
+  }
+
+  let grayMat: any = null;
+  let grayDownscaled: any = null;
+  let refMat: any = null;
+  let refDownscaled: any = null;
+
   try {
     const width = imageData.width;
     const height = imageData.height;
-
-    // Create ROI-cropped ImageData if ROI is specified
-    let processImageData = imageData;
     let offsetX = 0;
     let offsetY = 0;
 
+    // Create ROI-cropped ImageData if specified
+    let processImageData = imageData;
     if (roi) {
       console.log(
-        `[BlobDetect] ROI active: (${roi.minX},${roi.minY}) to (${roi.maxX},${roi.maxY}), ${roi.exclusionZones.length} exclusion zones`
+        `[BlobDetect-CV] ROI active: (${roi.minX},${roi.minY}) to (${roi.maxX},${roi.maxY}), ${roi.exclusionZones.length} exclusion zones`
       );
       const roiWidth = roi.maxX - roi.minX;
       const roiHeight = roi.maxY - roi.minY;
 
-      // Create a new ImageData for the ROI region
       const roiData = new Uint8ClampedArray(roiWidth * roiHeight * 4);
       for (let y = 0; y < roiHeight; y++) {
         for (let x = 0; x < roiWidth; x++) {
@@ -143,55 +232,89 @@ function detectBlobs(
       offsetX = roi.minX;
       offsetY = roi.minY;
     } else {
-      console.log(
-        `[BlobDetect] No ROI - processing full frame ${width}x${height}`
-      );
+      console.log(`[BlobDetect-CV] No ROI - processing full frame ${width}x${height}`);
     }
 
-    // Use shared CV pipeline:
-    // 1. Convert Canvas ImageData to grayscale
-    const gray = canvasToGrayscale(processImageData);
+    // 1. Convert to grayscale Mat (FAST!)
+    grayMat = canvasToGrayscaleMat(processImageData);
 
-    // 2. Apply shared detection pipeline
-    const detectedHoles = detectBulletHoles(
-      gray,
-      processImageData.width,
-      processImageData.height,
-      PARAMS
-    );
+    // 2. Downscale for performance (FAST with OpenCV resize!)
+    const scale = PARAMS.processingScale ?? 1;
+    grayDownscaled = downscaleMat(grayMat, scale);
 
     console.log(
-      `[BlobDetect] Shared CV pipeline detected ${detectedHoles.length} holes`
+      `[BlobDetect-CV] Downscaled ${grayMat.cols}x${grayMat.rows} → ${grayDownscaled.cols}x${grayDownscaled.rows} (${scale}x)`
     );
 
-    // Debug tracking: Get raw blobs for visualization
-    const rawBlobs: { x: number; y: number; radius: number }[] = [];
-    let afterROICount = 0;
-    let afterExclusionCount = 0;
+    // 3. Prepare reference frame Mat if using background subtraction
+    if (state?.referenceFrame && PARAMS.useBackgroundSubtraction) {
+      try {
+        // Reference frame is stored at full resolution, need to crop to match ROI
+        const refWidth = width;  // Full frame width
+        const refHeight = height;  // Full frame height
 
-    // For debug visualization, re-run edge detection and blob finding
-    if (PARAMS.debugMode && PARAMS.debugShowRawBlobs) {
-      const edges = sobelEdgeDetection(gray, processImageData.width, processImageData.height, PARAMS.edgeThreshold);
-      const blobs = findConnectedComponents(edges, processImageData.width, processImageData.height);
+        // Create full-resolution reference Mat
+        const refFull = new cv.Mat(refHeight, refWidth, cv.CV_8UC1);
+        for (let i = 0; i < state.referenceFrame.length && i < refFull.data.length; i++) {
+          refFull.data[i] = state.referenceFrame[i];
+        }
 
-      for (const blob of blobs) {
-        const shape = analyzeShape(blob);
-        const centerX = shape.centerX + offsetX;
-        const centerY = shape.centerY + offsetY;
-        rawBlobs.push({ x: centerX, y: centerY, radius: shape.radius });
+        // If ROI is active, crop reference to match
+        if (roi) {
+          const roiWidth = roi.maxX - roi.minX;
+          const roiHeight = roi.maxY - roi.minY;
+          const roiRect = new cv.Rect(roi.minX, roi.minY, roiWidth, roiHeight);
+
+          refMat = refFull.roi(roiRect).clone();  // Clone to own the memory
+          refFull.delete();  // Clean up full frame
+        } else {
+          refMat = refFull;  // Use full frame
+        }
+
+        // Downscale reference to match processing scale
+        refDownscaled = downscaleMat(refMat, scale);
+
+        console.log(
+          `[BlobDetect-CV] Reference frame prepared: ${refMat.cols}x${refMat.rows} → ${refDownscaled.cols}x${refDownscaled.rows}`
+        );
+      } catch (e) {
+        console.error('[BlobDetect-CV] Failed to create reference Mat:', e);
+        if (refMat) refMat.delete();
+        refMat = null;
+        refDownscaled = null;
       }
     }
 
-    // Apply ROI and exclusion filtering to detected holes
+    // 4. Apply OpenCV optimized detection pipeline (FAST!)
+    const detectionParams = { ...PARAMS };
+    if (state && state.calibratedMinHoleSize !== null && state.calibratedMaxHoleSize !== null) {
+      detectionParams.minBlobSize = state.calibratedMinHoleSize;
+      detectionParams.maxBlobSize = state.calibratedMaxHoleSize;
+      console.log(
+        `[BlobDetect-CV] Using calibrated sizes: ${state.calibratedMinHoleSize}-${state.calibratedMaxHoleSize} px²`
+      );
+    }
+
+    const detectedHoles = detectBulletHolesCV(
+      grayDownscaled,
+      detectionParams,
+      refDownscaled
+    );
+
+    console.log(`[BlobDetect-CV] OpenCV pipeline detected ${detectedHoles.length} holes`);
+
+    // 5. Scale up and filter holes
     const filteredHoles: DetectedHole[] = [];
 
     for (const hole of detectedHoles) {
-      // Adjust coordinates back to full frame
-      const centerX = hole.center.x + offsetX;
-      const centerY = hole.center.y + offsetY;
+      // Scale up from downscaled resolution
+      const scaledCenterX = hole.center.x * scale;
+      const scaledCenterY = hole.center.y * scale;
+      const scaledRadius = hole.radius * scale;
 
-      // Track for debug
-      afterROICount++;
+      // Adjust back to full frame coordinates
+      const centerX = scaledCenterX + offsetX;
+      const centerY = scaledCenterY + offsetY;
 
       // Skip if outside ROI quadrilateral
       if (roi && !isPointInQuad(centerX, centerY, roi.corners)) {
@@ -203,31 +326,145 @@ function detectBlobs(
         continue;
       }
 
-      afterExclusionCount++;
-
       filteredHoles.push({
         center: { x: centerX, y: centerY },
-        radius: hole.radius,
+        radius: scaledRadius,
         confidence: hole.confidence,
         metrics: hole.metrics,
       });
     }
 
-    // Store debug info
-    lastDebugInfo = {
-      rawBlobCount: rawBlobs.length,
-      afterROICount,
-      afterExclusionCount,
-      rawBlobs,
-    };
-
-    console.log(
-      `[BlobDetect] Filtering: ${detectedHoles.length} detected → ${afterROICount} after ROI → ${afterExclusionCount} final holes`
-    );
+    console.log(`[BlobDetect-CV] After filtering: ${filteredHoles.length} holes`);
 
     return filteredHoles;
   } catch (error) {
-    console.error('Blob detection failed:', error);
+    console.error('[BlobDetect-CV] OpenCV detection failed:', error);
+    return [];
+  } finally {
+    // CRITICAL: Clean up Mats to prevent memory leaks!
+    if (grayMat) grayMat.delete();
+    if (grayDownscaled) grayDownscaled.delete();
+    if (refMat) refMat.delete();
+    if (refDownscaled) refDownscaled.delete();
+  }
+}
+
+/**
+ * Legacy JavaScript blob detection (SLOW - fallback only)
+ * Used when OpenCV.js is not available
+ */
+function detectBlobsLegacy(
+  imageData: ImageData,
+  roi?: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    corners: { x: number; y: number }[];
+    exclusionZones: ExclusionZone[];
+  }
+): DetectedHole[] {
+  try {
+    const width = imageData.width;
+    const height = imageData.height;
+    let processImageData = imageData;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (roi) {
+      const roiWidth = roi.maxX - roi.minX;
+      const roiHeight = roi.maxY - roi.minY;
+      const roiData = new Uint8ClampedArray(roiWidth * roiHeight * 4);
+      for (let y = 0; y < roiHeight; y++) {
+        for (let x = 0; x < roiWidth; x++) {
+          const srcIdx = ((roi.minY + y) * width + (roi.minX + x)) * 4;
+          const dstIdx = (y * roiWidth + x) * 4;
+          roiData[dstIdx] = imageData.data[srcIdx] ?? 0;
+          roiData[dstIdx + 1] = imageData.data[srcIdx + 1] ?? 0;
+          roiData[dstIdx + 2] = imageData.data[srcIdx + 2] ?? 0;
+          roiData[dstIdx + 3] = imageData.data[srcIdx + 3] ?? 255;
+        }
+      }
+      processImageData = new ImageData(roiData, roiWidth, roiHeight);
+      offsetX = roi.minX;
+      offsetY = roi.minY;
+    }
+
+    const grayFull = canvasToGrayscale(processImageData);
+    const scale = PARAMS.processingScale ?? 1;
+    const { data: gray, width: procWidth, height: procHeight } = downscaleGrayscale(
+      grayFull,
+      processImageData.width,
+      processImageData.height,
+      scale
+    );
+
+    let referenceGray: Uint8Array | Uint8ClampedArray | undefined = undefined;
+    if (state?.referenceFrame && PARAMS.useBackgroundSubtraction) {
+      if (roi) {
+        const refWidth = roi.maxX - roi.minX;
+        const refHeight = roi.maxY - roi.minY;
+        const refFull = new Uint8Array(refWidth * refHeight);
+        for (let y = 0; y < refHeight; y++) {
+          for (let x = 0; x < refWidth; x++) {
+            const srcIdx = (roi.minY + y) * width + (roi.minX + x);
+            const dstIdx = y * refWidth + x;
+            refFull[dstIdx] = state.referenceFrame[srcIdx] ?? 0;
+          }
+        }
+        const { data: refDownscaled } = downscaleGrayscale(refFull, refWidth, refHeight, scale);
+        referenceGray = refDownscaled;
+      } else {
+        const { data: refDownscaled } = downscaleGrayscale(
+          state.referenceFrame,
+          width,
+          height,
+          scale
+        );
+        referenceGray = refDownscaled;
+      }
+    }
+
+    const detectionParams = { ...PARAMS };
+    if (state && state.calibratedMinHoleSize !== null && state.calibratedMaxHoleSize !== null) {
+      detectionParams.minBlobSize = state.calibratedMinHoleSize;
+      detectionParams.maxBlobSize = state.calibratedMaxHoleSize;
+    }
+
+    const detectedHoles = detectBulletHoles(
+      gray,
+      procWidth,
+      procHeight,
+      detectionParams,
+      referenceGray
+    );
+
+    const filteredHoles: DetectedHole[] = [];
+    for (const hole of detectedHoles) {
+      const scaledCenterX = hole.center.x * scale;
+      const scaledCenterY = hole.center.y * scale;
+      const scaledRadius = hole.radius * scale;
+      const centerX = scaledCenterX + offsetX;
+      const centerY = scaledCenterY + offsetY;
+
+      if (roi && !isPointInQuad(centerX, centerY, roi.corners)) {
+        continue;
+      }
+      if (roi && isInExclusionZone(centerX, centerY, roi.exclusionZones)) {
+        continue;
+      }
+
+      filteredHoles.push({
+        center: { x: centerX, y: centerY },
+        radius: scaledRadius,
+        confidence: hole.confidence,
+        metrics: hole.metrics,
+      });
+    }
+
+    return filteredHoles;
+  } catch (error) {
+    console.error('[BlobDetect-Legacy] Detection failed:', error);
     return [];
   }
 }
@@ -268,16 +505,15 @@ function drawDetections(
     ctx.lineTo(center.x, center.y + crossSize);
     ctx.stroke();
 
-    // Draw confidence label with hole ID
+    // Draw confidence label with hole ID and temporal info
     ctx.font = 'bold 14px Arial';
     ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(
-      `#${id} ${confidence.toFixed(0)}%`,
-      center.x,
-      center.y + radius + 15
-    );
+    const label = hole.temporalClusterCount > 0
+      ? `#${id} ${confidence.toFixed(0)}% [${hole.temporalClusterCount}]`
+      : `#${id} ${confidence.toFixed(0)}%`;
+    ctx.fillText(label, center.x, center.y + radius + 15);
   });
 }
 
@@ -332,7 +568,7 @@ function drawStatusPanel(
   debugInfo?: BlobDebugInfo | null
 ): void {
   const panelWidth = 280;
-  const panelHeight = PARAMS.debugMode && debugInfo ? 200 : 130;
+  const panelHeight = PARAMS.debugMode && debugInfo ? 250 : 160;
   const padding = 10;
   const lineHeight = 18;
 
@@ -379,6 +615,35 @@ function drawStatusPanel(
   // Frame dimensions
   ctx.fillStyle = holes.length > 0 ? '#00ff00' : '#ffa500';
   ctx.fillText(`Frame: ${width}x${height}`, padding, y);
+  y += lineHeight;
+
+  // Temporal window status
+  const historySize = state?.detectionHistory.length ?? 0;
+  ctx.fillStyle = '#00ffff';
+  ctx.fillText(`Temporal: ${historySize}/${PARAMS.temporalWindowSize} frames`, padding, y);
+  y += lineHeight;
+
+  // Fiducial cache status
+  if (state?.cachedFiducials) {
+    const age = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+    ctx.fillStyle = age === 0 ? '#00ff00' : '#ffff00';
+    ctx.fillText(`Fiducial cache: ${age}f old`, padding, y);
+  } else {
+    ctx.fillStyle = '#888888';
+    ctx.fillText(`Fiducial cache: none`, padding, y);
+  }
+  y += lineHeight;
+
+  // Reference frame status (IMPORTANT)
+  const hasRef = state?.referenceFrame !== null;
+  ctx.fillStyle = hasRef ? '#00ff00' : '#ff6600';
+  ctx.font = hasRef ? 'bold 14px monospace' : '14px monospace';
+  ctx.fillText(
+    hasRef ? '✓ Reference: Active (BG Sub)' : '⚠ Reference: None',
+    padding,
+    y
+  );
+  ctx.font = '14px monospace'; // Reset font
   y += lineHeight;
 
   // Debug statistics (if enabled)
@@ -435,8 +700,93 @@ interface ExclusionZone {
 }
 
 /**
+ * Calibrate scale from fiducial markers
+ * Fiducials are 150mm square - use this to calculate pixels per mm
+ * Then calculate appropriate min/max hole sizes based on bullet calibers
+ * @param markers - Detected fiducial markers
+ */
+function calibrateScaleFromFiducials(markers: DetectedMarker[]): void {
+  if (!state || markers.length === 0) return;
+
+  // Calculate average marker size in pixels from all available markers
+  let totalPixelSize = 0;
+  let count = 0;
+
+  for (const marker of markers) {
+    if (marker.corners.length >= 4) {
+      const c0 = marker.corners[0];
+      const c1 = marker.corners[1];
+      const c2 = marker.corners[2];
+      const c3 = marker.corners[3];
+
+      if (!c0 || !c1 || !c2 || !c3) continue;
+
+      // Calculate marker width and height from corners
+      const width1 = Math.hypot(
+        c1.x - c0.x,
+        c1.y - c0.y
+      );
+      const width2 = Math.hypot(
+        c2.x - c3.x,
+        c2.y - c3.y
+      );
+      const height1 = Math.hypot(
+        c3.x - c0.x,
+        c3.y - c0.y
+      );
+      const height2 = Math.hypot(
+        c2.x - c1.x,
+        c2.y - c1.y
+      );
+
+      // Average all measurements
+      const avgSize = (width1 + width2 + height1 + height2) / 4;
+      totalPixelSize += avgSize;
+      count++;
+    }
+  }
+
+  if (count === 0) return;
+
+  const avgMarkerPixels = totalPixelSize / count;
+  const fiducialSizeMM = 150; // Known physical size
+  const pixelsPerMM = avgMarkerPixels / fiducialSizeMM;
+
+  // Bullet hole sizes:
+  // - Small caliber (.22): ~5.6mm diameter
+  // - Medium (.380, 9mm): ~9-9.5mm diameter
+  // - Large (.45): ~11.4mm diameter
+  // Account for downscaling and use area (πr²)
+
+  const scale = PARAMS.processingScale ?? 1;
+  const minHoleDiameterMM = 5; // Smaller than .22 to catch damaged holes
+  const maxHoleDiameterMM = 15; // Larger than .45 for ragged holes
+
+  // Calculate pixel sizes (accounting for downscaling)
+  const minHoleDiameterPixels = (minHoleDiameterMM * pixelsPerMM) / scale;
+  const maxHoleDiameterPixels = (maxHoleDiameterMM * pixelsPerMM) / scale;
+
+  // Convert diameter to area (area = π * r²)
+  const minArea = Math.PI * Math.pow(minHoleDiameterPixels / 2, 2);
+  const maxArea = Math.PI * Math.pow(maxHoleDiameterPixels / 2, 2);
+
+  // Store calibration
+  state.pixelsPerMM = pixelsPerMM;
+  state.calibratedMinHoleSize = Math.floor(minArea);
+  state.calibratedMaxHoleSize = Math.ceil(maxArea);
+
+  console.log(
+    `[Calibration] Fiducial: ${avgMarkerPixels.toFixed(1)}px = ${fiducialSizeMM}mm → ${pixelsPerMM.toFixed(2)} px/mm`
+  );
+  console.log(
+    `[Calibration] Hole size range: ${minHoleDiameterMM}-${maxHoleDiameterMM}mm → ${state.calibratedMinHoleSize}-${state.calibratedMaxHoleSize} px² (area, after ${scale}x downscale)`
+  );
+}
+
+/**
  * Get ROI (Region of Interest) from fiducial markers 0-3 in context
  * Returns bounding box and corner points, or null if markers not available
+ * Now with fiducial persistence - uses cached ROI if markers temporarily lost
  *
  * Marker layout:
  * 0 (top-left) ---- 1 (top-right)
@@ -452,11 +802,32 @@ function getTargetROI(context: Readonly<FeatureContext>): {
   corners: { x: number; y: number }[];
   exclusionZones: ExclusionZone[]; // Exclude marker regions
 } | null {
+  if (!state) return null;
+
   // Read markers from context (provided by fiducial detection)
   const allMarkers = context.markers as DetectedMarker[] | undefined;
 
+  // Calibrate scale from markers if available
+  if (allMarkers && allMarkers.length > 0) {
+    calibrateScaleFromFiducials(allMarkers);
+  }
+
   if (!allMarkers || allMarkers.length === 0) {
-    console.log('[ROI] No markers in context - processing full frame');
+    // No markers detected - try using cached fiducials
+    if (state.cachedFiducials) {
+      const framesSinceLastSeen = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+      if (framesSinceLastSeen <= PARAMS.fiducialPersistenceFrames) {
+        console.log(
+          `[ROI] Using cached fiducials (${framesSinceLastSeen} frames old, ${state.cachedFiducials.markerCount} markers)`
+        );
+        return state.cachedFiducials.roi;
+      } else {
+        console.log('[ROI] Cached fiducials expired - processing full frame');
+        state.cachedFiducials = null;
+      }
+    } else {
+      console.log('[ROI] No markers in context - processing full frame');
+    }
     return null;
   }
 
@@ -470,6 +841,16 @@ function getTargetROI(context: Readonly<FeatureContext>): {
 
   // Need all 4 markers to define ROI
   if (markersMap.size !== 4) {
+    // Try using cached fiducials if available
+    if (state.cachedFiducials) {
+      const framesSinceLastSeen = state.totalFrames - state.cachedFiducials.lastSeenFrame;
+      if (framesSinceLastSeen <= PARAMS.fiducialPersistenceFrames) {
+        console.log(
+          `[ROI] Only ${markersMap.size}/4 markers - using cached fiducials (${framesSinceLastSeen} frames old)`
+        );
+        return state.cachedFiducials.roi;
+      }
+    }
     console.log(`[ROI] Only ${markersMap.size}/4 markers detected (need 0,1,2,3) - processing full frame`);
     return null;
   }
@@ -514,7 +895,7 @@ function getTargetROI(context: Readonly<FeatureContext>): {
     });
   }
 
-  return {
+  const roi = {
     minX: Math.floor(Math.min(...xs)),
     maxX: Math.ceil(Math.max(...xs)),
     minY: Math.floor(Math.min(...ys)),
@@ -522,6 +903,17 @@ function getTargetROI(context: Readonly<FeatureContext>): {
     corners,
     exclusionZones,
   };
+
+  // Cache this ROI for persistence if markers are lost in future frames
+  if (state) {
+    state.cachedFiducials = {
+      roi,
+      lastSeenFrame: state.totalFrames,
+      markerCount: 4,
+    };
+  }
+
+  return roi;
 }
 
 /**
@@ -553,8 +945,49 @@ function distance(
 }
 
 /**
+ * Analyze temporal persistence of a detection across frame history
+ * Returns boosted confidence and cluster count if hole appears repeatedly in same location
+ */
+function analyzeTemporalPersistence(
+  detection: DetectedHole,
+  history: DetectedHole[][]
+): { boostedConfidence: number; clusterCount: number } {
+  let clusterCount = 0;
+
+  // Count how many frames in history have a detection near this location
+  for (const frameDetections of history) {
+    // Limit search to prevent performance issues with many detections
+    const maxSearchDetections = Math.min(frameDetections.length, 50);
+
+    for (let i = 0; i < maxSearchDetections; i++) {
+      const historicDetection = frameDetections[i];
+      if (!historicDetection) break;
+
+      const dist = distance(detection.center, historicDetection.center);
+      if (dist <= PARAMS.temporalMatchDistance) {
+        clusterCount++;
+        break; // Only count once per frame
+      }
+    }
+  }
+
+  // Boost confidence if hole appears in multiple frames
+  let boostedConfidence = detection.confidence;
+  if (clusterCount >= PARAMS.minTemporalClustersForBoost) {
+    const boost = Math.min(
+      clusterCount * PARAMS.temporalConfidenceBoost,
+      40 // Cap boost at 40%
+    );
+    boostedConfidence = Math.min(100, detection.confidence + boost);
+  }
+
+  return { boostedConfidence, clusterCount };
+}
+
+/**
  * Update tracked holes with new detections
  * Returns list of confirmed holes to display
+ * Now with temporal analysis - holes appearing in same location across multiple frames get boosted confidence
  */
 function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
   if (!state) {
@@ -566,20 +999,71 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       trackedHoles: [],
       nextHoleId: 0,
       totalFrames: 0,
+      detectionHistory: [],
+      historyWindowSize: PARAMS.temporalWindowSize,
+      cachedFiducials: null,
+      fiducialPersistenceFrames: PARAMS.fiducialPersistenceFrames,
+      referenceFrame: null,
+      latestSourceImage: null,
+      skipCounter: 0,
+      lastProcessedHoles: [],
+      pixelsPerMM: null,
+      calibratedMinHoleSize: null,
+      calibratedMaxHoleSize: null,
     };
   }
 
-  state.totalFrames++;
-  const currentFrame = state.totalFrames;
+  state!.totalFrames++;
+  const currentFrame = state!.totalFrames;
+
+  // Limit detections to prevent performance issues (take top N by confidence)
+  const MAX_DETECTIONS_TO_PROCESS = 100;
+  const limitedDetections = newDetections.length > MAX_DETECTIONS_TO_PROCESS
+    ? newDetections
+        .sort((a, b) => b.confidence - a.confidence)
+        .slice(0, MAX_DETECTIONS_TO_PROCESS)
+    : newDetections;
+
+  // PERFORMANCE: Skip temporal analysis entirely (expensive and not needed with BG sub)
+  const shouldAnalyzeTemporal = false; // DISABLED for performance
+
+  // Add current detections to history only if temporal analysis is enabled
+  if (shouldAnalyzeTemporal) {
+    state!.detectionHistory.push([...limitedDetections]);
+
+    // Keep only the last N frames in history (sliding window)
+    if (state!.detectionHistory.length > state!.historyWindowSize) {
+      state!.detectionHistory.shift();
+    }
+  }
+
+  const enhancedDetections = shouldAnalyzeTemporal
+    ? limitedDetections.map((detection) => {
+        const { boostedConfidence, clusterCount } = analyzeTemporalPersistence(
+          detection,
+          state!.detectionHistory.slice(0, -1) // Exclude current frame
+        );
+
+        return {
+          ...detection,
+          confidence: boostedConfidence,
+          temporalClusterCount: clusterCount,
+        };
+      })
+    : limitedDetections.map((detection) => ({
+        ...detection,
+        temporalClusterCount: 0,
+      }));
+
   const matched = new Set<number>(); // Track which tracked holes were matched
 
-  // Match new detections with existing tracked holes
-  for (const detection of newDetections) {
+  // Match enhanced detections with existing tracked holes
+  for (const detection of enhancedDetections) {
     let bestMatch: TrackedHole | null = null;
     let bestDistance = Infinity;
 
     // Find closest tracked hole within threshold
-    for (const tracked of state.trackedHoles) {
+    for (const tracked of state!.trackedHoles) {
       const dist = distance(detection.center, tracked.center);
       if (
         dist < PARAMS.matchDistanceThreshold &&
@@ -594,7 +1078,7 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       // Update existing tracked hole
       matched.add(bestMatch.id);
 
-      // Smooth confidence using exponential moving average
+      // Smooth confidence using exponential moving average (with temporal boost)
       const alpha = PARAMS.confidenceSmoothingFactor;
       bestMatch.confidence =
         alpha * detection.confidence + (1 - alpha) * bestMatch.confidence;
@@ -604,38 +1088,51 @@ function updateTrackedHoles(newDetections: DetectedHole[]): TrackedHole[] {
       bestMatch.center.y = alpha * detection.center.y + (1 - alpha) * bestMatch.center.y;
       bestMatch.radius = alpha * detection.radius + (1 - alpha) * bestMatch.radius;
 
+      // Update temporal cluster count
+      bestMatch.temporalClusterCount = detection.temporalClusterCount;
+
       // Reset tracking counters
       bestMatch.framesSeen++;
       bestMatch.framesNotSeen = 0;
       bestMatch.lastSeen = currentFrame;
     } else {
       // Add new tracked hole
-      state.trackedHoles.push({
-        id: state.nextHoleId++,
+      state!.trackedHoles.push({
+        id: state!.nextHoleId++,
         center: { ...detection.center },
         radius: detection.radius,
         confidence: detection.confidence,
         framesSeen: 1,
         framesNotSeen: 0,
         lastSeen: currentFrame,
+        temporalClusterCount: detection.temporalClusterCount,
       });
     }
   }
 
   // Update holes that weren't matched this frame
-  for (const tracked of state.trackedHoles) {
+  for (const tracked of state!.trackedHoles) {
     if (!matched.has(tracked.id)) {
       tracked.framesNotSeen++;
     }
   }
 
   // Remove holes that haven't been seen for too long
-  state.trackedHoles = state.trackedHoles.filter(
-    (hole) => hole.framesNotSeen <= PARAMS.maxFramesNotSeen
-  );
+  // Holes with high temporal cluster counts persist longer (likely real holes)
+  state!.trackedHoles = state!.trackedHoles.filter((hole) => {
+    let maxFramesNotSeen = PARAMS.maxFramesNotSeen;
+
+    // Boost persistence for holes with strong temporal evidence
+    if (hole.temporalClusterCount >= PARAMS.minTemporalClustersForBoost) {
+      // Allow 2x persistence for temporally confirmed holes
+      maxFramesNotSeen *= 2;
+    }
+
+    return hole.framesNotSeen <= maxFramesNotSeen;
+  });
 
   // Return only confirmed holes (seen for minimum frames)
-  return state.trackedHoles.filter(
+  return state!.trackedHoles.filter(
     (hole) => hole.framesSeen >= PARAMS.minFramesToConfirm
   );
 }
@@ -653,6 +1150,17 @@ function updateFPS(): void {
       trackedHoles: [],
       nextHoleId: 0,
       totalFrames: 0,
+      detectionHistory: [],
+      historyWindowSize: PARAMS.temporalWindowSize,
+      cachedFiducials: null,
+      fiducialPersistenceFrames: PARAMS.fiducialPersistenceFrames,
+      referenceFrame: null,
+      latestSourceImage: null,
+      skipCounter: 0,
+      lastProcessedHoles: [],
+      pixelsPerMM: null,
+      calibratedMinHoleSize: null,
+      calibratedMaxHoleSize: null,
     };
     return;
   }
@@ -670,6 +1178,42 @@ function updateFPS(): void {
 }
 
 /**
+ * Capture current frame as reference for background subtraction
+ * Call this when the target is clean (no bullet holes)
+ */
+export function captureReferenceFrame(imageData: ImageData): void {
+  if (!state) {
+    console.warn('[Reference] State not initialized - run detection first');
+    return;
+  }
+
+  // Convert to grayscale
+  const gray = canvasToGrayscale(imageData);
+
+  // Store as reference frame
+  state.referenceFrame = gray;
+
+  console.log(`[Reference] Captured ${imageData.width}x${imageData.height} reference frame`);
+}
+
+/**
+ * Clear reference frame (go back to traditional detection)
+ */
+export function clearReferenceFrame(): void {
+  if (state) {
+    state.referenceFrame = null;
+    console.log('[Reference] Cleared reference frame');
+  }
+}
+
+/**
+ * Check if reference frame is captured
+ */
+export function hasReferenceFrame(): boolean {
+  return state?.referenceFrame !== null;
+}
+
+/**
  * Bullet hole detection processor with context pipeline
  */
 const bulletHoleProcessor: FeatureProcessor = (
@@ -682,6 +1226,11 @@ const bulletHoleProcessor: FeatureProcessor = (
     hasMarkers: !!context.markers,
     stateExists: !!state,
   });
+
+  // Store latest source image for reference capture
+  if (state) {
+    state.latestSourceImage = sourceImageData;
+  }
 
   const ctx = sharedCanvas.getContext('2d');
 
@@ -696,13 +1245,55 @@ const bulletHoleProcessor: FeatureProcessor = (
     // 1. Get ROI from context (markers provided by fiducial detection)
     const roi = getTargetROI(context);
 
-    // 2. Detect blobs (bullet holes) using shared CV modules
-    const currentDetections = detectBlobs(sourceImageData, roi ?? undefined);
+    // 2. PERFORMANCE: Frame skipping (process every Nth frame)
+    let trackedHoles: TrackedHole[];
+    let processingTime = 0;
+    let currentDetections: DetectedHole[] = [];
 
-    // 3. Update temporal tracking and get confirmed holes
-    const trackedHoles = updateTrackedHoles(currentDetections);
+    if (!state) {
+      // Initialize state if needed
+      state = {
+        lastFrameTime: performance.now(),
+        frameCount: 0,
+        fps: 0,
+        trackedHoles: [],
+        nextHoleId: 0,
+        totalFrames: 0,
+        detectionHistory: [],
+        historyWindowSize: PARAMS.temporalWindowSize,
+        cachedFiducials: null,
+        fiducialPersistenceFrames: PARAMS.fiducialPersistenceFrames,
+        referenceFrame: null,
+        latestSourceImage: sourceImageData,
+        skipCounter: 0,
+        lastProcessedHoles: [],
+        pixelsPerMM: null,
+        calibratedMinHoleSize: null,
+        calibratedMaxHoleSize: null,
+      };
+    }
 
-    const processingTime = performance.now() - startTime;
+    const shouldSkip = PARAMS.frameSkip > 0 && state!.skipCounter % (PARAMS.frameSkip + 1) !== 0;
+    state!.skipCounter++;
+
+    if (shouldSkip) {
+      // Reuse last processed holes (MASSIVE performance gain!)
+      trackedHoles = state!.lastProcessedHoles;
+      processingTime = 0; // No processing time
+      console.log(`[PROCESSOR] Skipped frame ${state!.skipCounter} (frameSkip=${PARAMS.frameSkip})`);
+    } else {
+      // Normal processing
+      // 2. Detect blobs (bullet holes) using shared CV modules
+      currentDetections = detectBlobs(sourceImageData, roi ?? undefined);
+
+      // 3. Update temporal tracking and get confirmed holes
+      trackedHoles = updateTrackedHoles(currentDetections);
+
+      // Cache for skipped frames
+      state!.lastProcessedHoles = trackedHoles;
+
+      processingTime = performance.now() - startTime;
+    }
 
     // Update FPS
     updateFPS();
@@ -710,19 +1301,7 @@ const bulletHoleProcessor: FeatureProcessor = (
     // 4. Render visualization (on top of fiducial layer)
     // NOTE: Don't call putImageData - fiducial detection already drew the base image
 
-    // Draw debug visualization if enabled
-    if (PARAMS.debugMode && PARAMS.debugShowRawBlobs && lastDebugInfo) {
-      // Draw ALL raw blobs in red (before filtering)
-      ctx.strokeStyle = '#ff0000';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      lastDebugInfo.rawBlobs.forEach((blob) => {
-        ctx.beginPath();
-        ctx.arc(blob.x, blob.y, blob.radius, 0, 2 * Math.PI);
-        ctx.stroke();
-      });
-      ctx.setLineDash([]);
-    }
+    // Debug visualization disabled (debugMode: false in params)
 
     // Draw ROI outline if active
     if (roi) {
@@ -787,6 +1366,23 @@ function createControlPanel(): HTMLElement {
       <button id="preset-reset" class="preset-btn">Reset</button>
     </div>
 
+    <div class="control-group" style="background: rgba(0, 255, 100, 0.1); padding: 10px; border-radius: 4px; border: 1px solid #00ff66;">
+      <h4 style="color: #00ff66; margin: 0 0 10px 0;">📸 Background Subtraction (RECOMMENDED)</h4>
+      <div style="font-size: 11px; color: #aaa; margin-bottom: 10px;">
+        Captures clean target, then detects only new holes. Works with any target pattern!
+      </div>
+      <button id="capture-reference" style="width: 100%; background: #00ff66; color: #000; border: none; padding: 10px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-bottom: 5px;">
+        📷 Capture Clean Target
+      </button>
+      <button id="clear-reference" style="width: 100%; background: #ff4444; color: #fff; border: none; padding: 8px; border-radius: 4px; cursor: pointer;">
+        ✕ Clear Reference
+      </button>
+      <div style="font-size: 10px; color: #888; margin-top: 8px;">
+        <label>Difference Threshold: <span id="val-differenceThreshold">${PARAMS.differenceThreshold}</span></label>
+        <input type="range" id="ctrl-differenceThreshold" min="5" max="50" value="${PARAMS.differenceThreshold}" step="1">
+      </div>
+    </div>
+
     <div class="control-group">
       <h4 style="color: #ff00ff; margin: 10px 0 5px 0;">⚡ Edge Detection</h4>
 
@@ -818,6 +1414,31 @@ function createControlPanel(): HTMLElement {
     </div>
 
     <div class="control-group">
+      <h4 style="color: #ff00ff; margin: 10px 0 5px 0;">🔬 Advanced Detection</h4>
+
+      <label>
+        <input type="checkbox" id="ctrl-useContrastEnhancement" ${PARAMS.useContrastEnhancement ? 'checked' : ''}>
+        Contrast Enhancement
+      </label>
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">Boost low-contrast holes</div>
+
+      <label>Contrast Tile: <span id="val-contrastTileSize">${PARAMS.contrastTileSize}</span>px</label>
+      <input type="range" id="ctrl-contrastTileSize" min="16" max="64" value="${PARAMS.contrastTileSize}" step="8">
+
+      <label>
+        <input type="checkbox" id="ctrl-useLoGDetection" ${PARAMS.useLoGDetection ? 'checked' : ''}>
+        LoG Blob Detection
+      </label>
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">Detect dark & light holes</div>
+
+      <label>LoG Sigma: <span id="val-logSigma">${PARAMS.logSigma}</span></label>
+      <input type="range" id="ctrl-logSigma" min="0.5" max="3.0" value="${PARAMS.logSigma}" step="0.1">
+
+      <label>LoG Threshold: <span id="val-logThreshold">${PARAMS.logThreshold}</span></label>
+      <input type="range" id="ctrl-logThreshold" min="5" max="30" value="${PARAMS.logThreshold}" step="1">
+    </div>
+
+    <div class="control-group">
       <h4 style="color: #ff8800; margin: 10px 0 5px 0;">⏱️ Tracking</h4>
 
       <label>Match Distance: <span id="val-matchDistanceThreshold">${PARAMS.matchDistanceThreshold}</span>px</label>
@@ -831,6 +1452,27 @@ function createControlPanel(): HTMLElement {
 
       <label>Smoothing: <span id="val-confidenceSmoothingFactor">${PARAMS.confidenceSmoothingFactor}</span></label>
       <input type="range" id="ctrl-confidenceSmoothingFactor" min="0.1" max="0.9" value="${PARAMS.confidenceSmoothingFactor}" step="0.05">
+    </div>
+
+    <div class="control-group">
+      <h4 style="color: #00ccff; margin: 10px 0 5px 0;">🕰️ Temporal Analysis</h4>
+
+      <label>Window Size: <span id="val-temporalWindowSize">${PARAMS.temporalWindowSize}</span> frames</label>
+      <input type="range" id="ctrl-temporalWindowSize" min="3" max="15" value="${PARAMS.temporalWindowSize}" step="1">
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">History for time-series analysis</div>
+
+      <label>Match Distance: <span id="val-temporalMatchDistance">${PARAMS.temporalMatchDistance}</span>px</label>
+      <input type="range" id="ctrl-temporalMatchDistance" min="10" max="50" value="${PARAMS.temporalMatchDistance}" step="1">
+
+      <label>Confidence Boost: <span id="val-temporalConfidenceBoost">${PARAMS.temporalConfidenceBoost}</span>%</label>
+      <input type="range" id="ctrl-temporalConfidenceBoost" min="5" max="30" value="${PARAMS.temporalConfidenceBoost}" step="1">
+
+      <label>Min Clusters: <span id="val-minTemporalClustersForBoost">${PARAMS.minTemporalClustersForBoost}</span></label>
+      <input type="range" id="ctrl-minTemporalClustersForBoost" min="2" max="10" value="${PARAMS.minTemporalClustersForBoost}" step="1">
+
+      <label>Fiducial Persist: <span id="val-fiducialPersistenceFrames">${PARAMS.fiducialPersistenceFrames}</span> frames</label>
+      <input type="range" id="ctrl-fiducialPersistenceFrames" min="5" max="30" value="${PARAMS.fiducialPersistenceFrames}" step="1">
+      <div style="font-size: 10px; color: #888; margin-top: 2px;">Keep ROI when markers lost</div>
     </div>
 
     <style>
@@ -875,8 +1517,23 @@ function updateParam(paramName: keyof typeof PARAMS, value: number): void {
   const valueSpan = document.getElementById(`val-${paramName}`);
   if (valueSpan) {
     // Format based on parameter type
-    const isDecimal = paramName.includes('Factor') || paramName.includes('Circularity') || paramName.includes('Compactness');
+    const isDecimal = paramName.includes('Factor') ||
+                     paramName.includes('Circularity') ||
+                     paramName.includes('Compactness') ||
+                     paramName.includes('Sigma');
     valueSpan.textContent = value.toFixed(isDecimal ? 2 : 0);
+  }
+
+  // Update state if temporal window size changed
+  if (paramName === 'temporalWindowSize' && state) {
+    state.historyWindowSize = value;
+    console.log(`Updated temporal window size to ${value} frames`);
+  }
+
+  // Update state if fiducial persistence changed
+  if (paramName === 'fiducialPersistenceFrames' && state) {
+    state.fiducialPersistenceFrames = value;
+    console.log(`Updated fiducial persistence to ${value} frames`);
   }
 
   console.log(`Updated ${paramName} to ${value}`);
@@ -946,6 +1603,21 @@ export function setupBulletHoleControls(): void {
   document.getElementById('preset-large')?.addEventListener('click', () => applyPreset('large'));
   document.getElementById('preset-reset')?.addEventListener('click', () => applyPreset('reset'));
 
+  // Setup reference capture/clear buttons
+  document.getElementById('capture-reference')?.addEventListener('click', () => {
+    if (state?.latestSourceImage) {
+      captureReferenceFrame(state.latestSourceImage);
+      console.log('Reference frame captured');
+    } else {
+      console.warn('No source image available for reference capture');
+    }
+  });
+
+  document.getElementById('clear-reference')?.addEventListener('click', () => {
+    clearReferenceFrame();
+    console.log('Reference frame cleared');
+  });
+
   // Setup parameter sliders
   const paramKeys: (keyof typeof PARAMS)[] = [
     'edgeThreshold',
@@ -953,10 +1625,19 @@ export function setupBulletHoleControls(): void {
     'maxBlobSize',
     'minCircularity',
     'minCompactness',
+    'contrastTileSize',
+    'logSigma',
+    'logThreshold',
+    'differenceThreshold',
     'matchDistanceThreshold',
     'minFramesToConfirm',
     'maxFramesNotSeen',
     'confidenceSmoothingFactor',
+    'temporalWindowSize',
+    'temporalMatchDistance',
+    'temporalConfidenceBoost',
+    'minTemporalClustersForBoost',
+    'fiducialPersistenceFrames',
   ];
 
   paramKeys.forEach((key) => {
@@ -968,6 +1649,23 @@ export function setupBulletHoleControls(): void {
       });
     }
   });
+
+  // Setup checkboxes for boolean parameters
+  const contrastCheckbox = document.getElementById('ctrl-useContrastEnhancement') as HTMLInputElement;
+  if (contrastCheckbox) {
+    contrastCheckbox.addEventListener('change', (e) => {
+      PARAMS.useContrastEnhancement = (e.target as HTMLInputElement).checked;
+      console.log(`Contrast enhancement: ${PARAMS.useContrastEnhancement}`);
+    });
+  }
+
+  const logCheckbox = document.getElementById('ctrl-useLoGDetection') as HTMLInputElement;
+  if (logCheckbox) {
+    logCheckbox.addEventListener('change', (e) => {
+      PARAMS.useLoGDetection = (e.target as HTMLInputElement).checked;
+      console.log(`LoG detection: ${PARAMS.useLoGDetection}`);
+    });
+  }
 
   console.log('Bullet hole controls initialized');
 }

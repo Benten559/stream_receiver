@@ -12,11 +12,28 @@ export class RedisManager {
     private isConnected: boolean = false;
     private frameCallback?: (frame: CameraFrame) => void;
 
+    // Frame statistics
+    private frameCount: number = 0;
+    private lastFrameLog: number = Date.now();
+
+    // Track if we've subscribed
+    private isSubscribed: boolean = false;
+
     constructor() {
         this.subscriber = createClient({
             socket: {
                 host: this.config.redis.host,
                 port: this.config.redis.port,
+                // Enable automatic reconnection with exponential backoff
+                reconnectStrategy: (retries: number) => {
+                    if (retries > 10) {
+                        console.error('Redis: Max reconnection attempts reached');
+                        return new Error('Max reconnection attempts reached');
+                    }
+                    const delay = Math.min(retries * 100, 3000);
+                    console.log(`Redis: Reconnecting in ${delay}ms (attempt ${retries})`);
+                    return delay;
+                },
             },
             // Don't decode responses
             disableOfflineQueue: false,
@@ -25,6 +42,7 @@ export class RedisManager {
         // Set up error handlers
         this.subscriber.on('error', (err) => {
             console.error('Redis subscriber error:', err);
+            // Don't set isConnected = false here, let 'disconnect' event handle it
         });
 
         this.subscriber.on('connect', () => {
@@ -32,9 +50,37 @@ export class RedisManager {
             this.isConnected = true;
         });
 
+        this.subscriber.on('ready', async () => {
+            console.log('Redis subscriber ready');
+            this.isConnected = true;
+
+            // Re-subscribe after reconnection (subscriptions are lost on disconnect)
+            if (!this.isSubscribed) {
+                console.log('Redis: Re-subscribing to channels after reconnection');
+                try {
+                    await this.setupPatternSubscription();
+                } catch (error) {
+                    console.error('Redis: Failed to re-subscribe:', error);
+                }
+            }
+        });
+
+        this.subscriber.on('reconnecting', () => {
+            console.log('Redis subscriber reconnecting...');
+            this.isConnected = false;
+            this.isSubscribed = false; // Subscriptions are lost
+        });
+
         this.subscriber.on('disconnect', () => {
             console.log('Redis subscriber disconnected');
             this.isConnected = false;
+            this.isSubscribed = false; // Subscriptions are lost
+        });
+
+        this.subscriber.on('end', () => {
+            console.log('Redis subscriber connection ended');
+            this.isConnected = false;
+            this.isSubscribed = false; // Subscriptions are lost
         });
     }
 
@@ -59,6 +105,12 @@ export class RedisManager {
      * Set up pattern subscription for camera channels
      */
     private async setupPatternSubscription(): Promise<void> {
+        // Avoid double-subscription
+        if (this.isSubscribed) {
+            console.log('Redis: Already subscribed, skipping');
+            return;
+        }
+
         try {
             await this.subscriber.pSubscribe(
                 this.config.redis.channelPattern,
@@ -70,10 +122,12 @@ export class RedisManager {
                 true // Request bufferMode to get binary data as Buffers
             );
 
+            this.isSubscribed = true;
             console.log(`Subscribed to pattern: ${this.config.redis.channelPattern}`);
 
         } catch (error) {
             console.error('Failed to set up pattern subscription:', error);
+            this.isSubscribed = false;
             throw error;
         }
     }
@@ -82,6 +136,7 @@ export class RedisManager {
      * Handle incoming messages from Redis
      * @description
      * Extract camera ID from channel name (e.g., "camera_stream:cam1" -> "cam1")
+     * Validates JPEG format and logs frame statistics
      */
     private handleMessage(message: Buffer, channel: string): void {
         const cameraId = this.extractCameraId(channel);
@@ -89,6 +144,45 @@ export class RedisManager {
         if (!cameraId) {
             console.warn(`Could not extract camera ID from channel: ${channel}`);
             return;
+        }
+
+        // Validate JPEG format (SOI marker: 0xFFD8, EOI marker: 0xFFD9)
+        const isValidJPEG =
+            message.length >= 2 &&
+            message[0] === 0xFF &&
+            message[1] === 0xD8 &&
+            message[message.length - 2] === 0xFF &&
+            message[message.length - 1] === 0xD9;
+
+        if (!isValidJPEG) {
+            console.error(
+                `[Redis] Invalid JPEG data from ${cameraId}: ` +
+                `length=${message.length}, ` +
+                `header=${message.slice(0, 2).toString('hex')}, ` +
+                `footer=${message.slice(-2).toString('hex')}`
+            );
+            return;
+        }
+
+        // Log frame stats every 100 frames
+        if (!this.frameCount) {
+            this.frameCount = 0;
+            this.lastFrameLog = Date.now();
+        }
+        this.frameCount++;
+
+        if (this.frameCount % 100 === 0) {
+            const now = Date.now();
+            const elapsed = (now - this.lastFrameLog) / 1000;
+            const fps = (100 / elapsed).toFixed(1);
+            const avgSize = (message.length / 1024).toFixed(1);
+
+            console.log(
+                `[Redis] ${cameraId}: ${this.frameCount} frames received, ` +
+                `${fps} FPS, ${avgSize} KB avg`
+            );
+
+            this.lastFrameLog = now;
         }
 
         const frame: CameraFrame = {

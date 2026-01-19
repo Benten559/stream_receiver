@@ -11,6 +11,9 @@ export class CanvasRenderer {
   private label: string;
   private canvasContainer: HTMLDivElement;
 
+  // Decode stats (log every 100 frames to reduce console spam)
+  private decodeCount: number = 0;
+
   constructor(containerId: string, cameraId: string, label: string) {
     const container = document.getElementById(containerId);
     if (!container) {
@@ -65,25 +68,34 @@ export class CanvasRenderer {
    * @returns Promise<ImageData>
    */
   async decodeFrame(base64Data: string): Promise<ImageData> {
-    const img = await this.createTempImage(base64Data);
+    try {
+      const img = await this.createTempImage(base64Data);
 
-    // Create temporary canvas for decoding
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = img.width;
-    tempCanvas.height = img.height;
+      // Create temporary canvas for decoding
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = img.width;
+      tempCanvas.height = img.height;
 
-    const tempCtx = tempCanvas.getContext('2d');
-    if (!tempCtx) {
-      throw new Error('Failed to get 2D context for temp canvas');
+      const tempCtx = tempCanvas.getContext('2d');
+      if (!tempCtx) {
+        throw new Error('Failed to get 2D context for temp canvas');
+      }
+
+      // Draw image to temp canvas
+      tempCtx.drawImage(img, 0, 0);
+
+      // Extract ImageData
+      const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
+
+      return imageData;
+    } catch (error) {
+      const preview = base64Data.substring(0, 20);
+      console.error(
+        `[CanvasRenderer] JPEG decode failed: ${error}`,
+        `Base64 length: ${base64Data.length}, Preview: ${preview}...`
+      );
+      throw error;
     }
-
-    // Draw image to temp canvas
-    tempCtx.drawImage(img, 0, 0);
-
-    // Extract ImageData
-    const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
-
-    return imageData;
   }
 
   /**
@@ -96,11 +108,23 @@ export class CanvasRenderer {
       const img = new Image();
 
       img.onload = () => {
+        this.decodeCount++;
+        // Log every 100 frames to reduce console spam
+        if (this.decodeCount % 100 === 0) {
+          console.log(`[CanvasRenderer] Decoded ${this.decodeCount} frames: ${img.width}x${img.height}, ${(base64Data.length / 1024).toFixed(1)} KB`);
+        }
         resolve(img);
       };
 
       img.onerror = (error) => {
-        reject(new Error(`Failed to load image: ${error}`));
+        const preview = base64Data.substring(0, 50);
+        console.error(
+          `[CanvasRenderer] Image load error:`,
+          `Length: ${base64Data.length} bytes`,
+          `Preview: ${preview}...`,
+          error
+        );
+        reject(new Error(`Failed to load JPEG image: ${error}`));
       };
 
       // Set data URL

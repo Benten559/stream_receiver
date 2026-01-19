@@ -12,7 +12,7 @@
  * @returns Binary edge map (0 or 255)
  */
 export function sobelEdgeDetection(
-    gray: Uint8ClampedArray,
+    gray: Uint8Array | Uint8ClampedArray,
     width: number,
     height: number,
     threshold: number
