@@ -18,6 +18,58 @@ cameraRouter.get('/available', (req: Request, res: Response<AvailableCamerasResp
 });
 
 /**
+ * GET /camera/discover
+ * Triggers stream discovery and returns available camera IDs
+ */
+cameraRouter.get('/discover', async (req: Request, res: Response<AvailableCamerasResponse>) => {
+    const cameras = await cameraService.discoverCameras();
+    res.json({
+        cameras,
+        count: cameras.length,
+    });
+});
+
+/**
+ * GET /camera/debug/:cameraId
+ * Debug endpoint - serves a single JPEG frame with validation info
+ * Use this to test if binary data from Redis is valid
+ */
+cameraRouter.get('/debug/:cameraId', (req: Request, res: Response) => {
+    const { cameraId } = req.params;
+    const frame = cameraService.getLatestFrame(cameraId);
+
+    if (!frame) {
+        res.status(404).json({ error: `No frame for camera: ${cameraId}`, availableCameras: cameraService.getAvailableCameras() });
+        return;
+    }
+
+    const isBuffer = Buffer.isBuffer(frame);
+    const typeName = frame?.constructor?.name || typeof frame;
+    const header = isBuffer ? frame.slice(0, 4).toString('hex') : 'N/A';
+    const isValidJPEG = isBuffer && frame.length >= 2 && frame[0] === 0xFF && frame[1] === 0xD8;
+
+    // Log debug info
+    console.log(`[DEBUG] Frame for ${cameraId}: type=${typeName}, isBuffer=${isBuffer}, length=${frame.length}, header=${header}, validJPEG=${isValidJPEG}`);
+
+    if (!isValidJPEG) {
+        res.status(500).json({
+            error: 'Invalid JPEG data',
+            type: typeName,
+            isBuffer,
+            length: frame.length,
+            header,
+            firstBytes: isBuffer ? [...frame.slice(0, 10)] : []
+        });
+        return;
+    }
+
+    // Serve as JPEG image
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Content-Length', String(frame.length));
+    res.send(frame);
+});
+
+/**
  * GET /camera/status
  * @returns detailed status information for debugging
  */
@@ -45,26 +97,27 @@ cameraRouter.get('/status', (req: Request, res: Response) => {
 
 /**
  * GET /camera/frame/:cameraId
- * @returns the latest JPEG frame for the specified camera
  */
 cameraRouter.get('/frame/:cameraId', (req: Request, res: Response<Buffer | ErrorResponse>) => {
     const { cameraId } = req.params;
-    const frame = cameraService.getLatestFrame(cameraId);
+    if (!cameraId) {
+        res.status(400).json({ error: 'Camera ID is required' });
+        return;
+    }
 
+    const frame = cameraService.getLatestFrame(cameraId);
     if (!frame) {
         res.status(404).json({ error: `No frame available for camera: ${cameraId}` });
         return;
     }
 
-    // Send JPEG image
     res.set('Content-Type', 'image/jpeg');
     res.send(frame);
 });
 
 /**
  * GET /camera/stream/:cameraId
- * MJPEG stream endpoint - multipart/x-mixed-replace stream for video
- * Can be used directly in an <img> tag: <img src="/camera/stream/cam1">
+ * MJPEG stream endpoint (Binary multipart)
  */
 cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
     const { cameraId } = req.params;
@@ -74,25 +127,18 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
         return;
     }
 
-    // Set headers for MJPEG stream
     res.setHeader('Content-Type', 'multipart/x-mixed-replace; boundary=frame');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Connection', 'keep-alive');
 
-    console.log(`Client connected to MJPEG stream: ${cameraId}`);
-
-    // Subscribe to camera frames (serverTimestamp not used for MJPEG)
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer, _serverTimestamp: number) => {
-        // Check if response is still writable before attempting write
+    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
         if (!res.writable) {
-            console.log(`Response not writable for ${cameraId}, unsubscribing`);
             unsubscribe();
             return;
         }
-
         try {
-            // Send frame in multipart format
             res.write('--frame\r\n');
             res.write('Content-Type: image/jpeg\r\n');
             res.write(`Content-Length: ${frameData.length}\r\n`);
@@ -100,42 +146,16 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
             res.write(frameData);
             res.write('\r\n');
         } catch (err) {
-            console.error(`Error writing frame for camera ${cameraId}:`, err);
             unsubscribe();
         }
     });
 
-    // Send initial frame if available
-    const initialFrame = cameraService.getLatestFrame(cameraId);
-    if (initialFrame) {
-        try {
-            res.write('--frame\r\n');
-            res.write('Content-Type: image/jpeg\r\n');
-            res.write(`Content-Length: ${initialFrame.length}\r\n`);
-            res.write('\r\n');
-            res.write(initialFrame);
-            res.write('\r\n');
-        } catch (err) {
-            console.error(`Error writing initial frame for camera ${cameraId}:`, err);
-            unsubscribe();
-        }
-    }
-
-    req.on('close', () => {
-        console.log(`Client disconnected from MJPEG stream: ${cameraId}`);
-        unsubscribe();
-        res.end();
-    });
-
-    req.on('error', (err) => {
-        console.error(`Request error for camera ${cameraId}:`, err);
-        unsubscribe();
-    });
+    req.on('close', () => unsubscribe());
 });
 
 /**
  * GET /camera/stream/:cameraId/sse
- * Server-Sent Events endpoint for real-time frame streaming (alternative to MJPEG)
+ * Server-Sent Events endpoint (JSON Base64)
  */
 cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
     const { cameraId } = req.params;
@@ -145,131 +165,109 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
         return;
     }
 
-    // headers for SSE
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
 
-    // Send initial comment to establish connection
     res.write(': connected\n\n');
 
-    console.log(`Client connected to SSE stream: ${cameraId}`);
+    const sendFrame = (frameData: Buffer) => {
+        if (!res.writable) return;
 
-    // Subscribe to camera frames
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer, serverTimestamp: number) => {
-        // Check if response is still writable BEFORE attempting write
+        try {
+            const base64Frame = frameData.toString('base64');
+
+            const payload = JSON.stringify({
+                data: base64Frame,
+                serverTimestamp: Date.now()
+            });
+
+            res.write(`event: frame\n`);
+            res.write(`data: ${payload}\n\n`);
+        } catch (err) {
+            console.error(`Error writing SSE frame for ${cameraId}:`, err);
+        }
+    };
+
+    const unsubscribe = cameraService.subscribeToCamera(cameraId, sendFrame);
+
+    const initialFrame = cameraService.getLatestFrame(cameraId);
+    if (initialFrame) sendFrame(initialFrame);
+
+    req.on('close', () => {
+        unsubscribe();
+        res.end();
+    });
+});
+
+/**
+ * GET /camera/holes/sse
+ */
+cameraRouter.get('/holes/sse', (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    res.write(': connected\n\n');
+
+    const unsubscribe = cameraService.subscribeToHoleNotifications((notification) => {
         if (!res.writable) {
-            console.log(`SSE response not writable for ${cameraId}, unsubscribing`);
             unsubscribe();
             return;
         }
 
         try {
-            // Convert frame to base64 for transmission
-            const base64Frame = frameData.toString('base64');
-
-            // Send JSON with frame data AND server timestamp for accurate age detection
-            const framePayload = JSON.stringify({
-                data: base64Frame,
-                serverTimestamp,
+            const payload = JSON.stringify({
+                x: notification.x,
+                y: notification.y,
+                timestamp: notification.timestamp,
             });
-
-            res.write(`event: frame\n`);
-            res.write(`data: ${framePayload}\n\n`);
+            res.write(`event: hole\n`);
+            res.write(`data: ${payload}\n\n`);
         } catch (err) {
-            console.error(`Error writing SSE frame for camera ${cameraId}:`, err);
             unsubscribe();
         }
     });
 
-    const initialFrame = cameraService.getLatestFrame(cameraId);
-    if (initialFrame) {
-        try {
-            const base64Frame = initialFrame.toString('base64');
-            // Use current time for initial frame (it's being sent immediately)
-            const framePayload = JSON.stringify({
-                data: base64Frame,
-                serverTimestamp: Date.now(),
-            });
-            res.write(`event: frame\n`);
-            res.write(`data: ${framePayload}\n\n`);
-        } catch (err) {
-            console.error(`Error writing initial SSE frame for camera ${cameraId}:`, err);
-            unsubscribe();
-        }
-    }
-
-    req.on('close', () => {
-        console.log(`Client disconnected from SSE stream: ${cameraId}`);
-        unsubscribe();
-        res.end();
-    });
-
-    req.on('error', (err) => {
-        console.error(`Request error for SSE camera ${cameraId}:`, err);
-        unsubscribe();
-    });
+    req.on('close', () => unsubscribe());
 });
 
 /**
- * POST /camera/recording/start
- * Start a new recording session
+ * Recording Routes
  */
 cameraRouter.post('/recording/start', async (req: Request, res: Response) => {
     try {
         const session = await cameraService.startRecording();
-        res.json({
-            success: true,
-            session: {
-                sessionId: session.sessionId,
-                sessionPath: session.sessionPath,
-                startTime: session.startTime,
-            },
-        });
+        res.json({ success: true, session });
     } catch (error: any) {
-        res.status(400).json({
-            success: false,
-            error: error.message,
-        });
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 
-/**
- * POST /camera/recording/stop
- * Stop the current recording session
- */
 cameraRouter.post('/recording/stop', async (req: Request, res: Response) => {
     try {
         await cameraService.stopRecording();
-        res.json({
-            success: true,
-            message: 'Recording stopped',
-        });
+        res.json({ success: true, message: 'Recording stopped' });
     } catch (error: any) {
-        res.status(400).json({
-            success: false,
-            error: error.message,
-        });
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 
 /**
  * GET /camera/recording/status
- * Get current recording session status
+ * FIX: Explicitly typed the reduce accumulator as 'number' to fix TS18046
  */
 cameraRouter.get('/recording/status', (req: Request, res: Response) => {
     const status = cameraService.getRecordingStatus();
+    if (!status) return res.json({ isRecording: false });
 
-    if (!status) {
-        res.json({
-            isRecording: false,
-        });
-        return;
-    }
-
-    const frameCountsArray = Array.from(status.frameCounters.values()) as number[];
-    const totalFrames = frameCountsArray.reduce((a, b) => a + b, 0);
+    // Explicitly casting the accumulator 'a' and current value 'b' as numbers
+    const totalFrames = Array.from(status.frameCounters.values()).reduce(
+        (a: number, b: any) => a + (b as number),
+        0
+    );
 
     res.json({
         isRecording: status.isRecording,
@@ -278,7 +276,7 @@ cameraRouter.get('/recording/status', (req: Request, res: Response) => {
         startTime: status.startTime,
         cameras: Array.from(status.cameras),
         frameCounts: Object.fromEntries(status.frameCounters),
-        totalFrames,
+        totalFrames
     });
 });
 

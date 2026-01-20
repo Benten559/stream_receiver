@@ -1,19 +1,20 @@
 // src/services/camera_service.ts
-import { RedisManager } from './redis_manager.ts';
+import { RedisManager, type HoleNotification } from './redis_manager.ts';
 import { FrameRecorder } from './frame_recorder.ts';
 import type { CameraFrame, CameraState } from '../types/camera.types.ts';
-import { initializeConfig } from '../config/index.ts';
 
-type FrameListener = (frame: Buffer, serverTimestamp: number) => void;
+type FrameListener = (frame: Buffer) => void;
+type HoleListener = (notification: HoleNotification) => void;
 
 export class CameraService {
     private redisManager: RedisManager;
     private cameraStates: Map<string, CameraState> = new Map();
-    private frameListeners : Map<string, Set<FrameListener>> = new Map();
+    private frameListeners: Map<string, Set<FrameListener>> = new Map();
+    private holeListeners: Set<HoleListener> = new Set();
     private frameRecorder: FrameRecorder;
 
-    // FPS tracking (only logged when viewers are connected)
-    private frameCounters: Map<string, number> = new Map();
+    // FPS tracking
+    private frameCount: number = 0;
     private lastFpsLog: number = Date.now();
 
     constructor() {
@@ -23,6 +24,11 @@ export class CameraService {
         // Register frame handler
         this.redisManager.onFrame((frame: CameraFrame) => {
             this.handleFrame(frame);
+        });
+
+        // Register hole notification handler
+        this.redisManager.onHoleNotification((notification: HoleNotification) => {
+            this.handleHoleNotification(notification);
         });
     }
 
@@ -36,13 +42,10 @@ export class CameraService {
     }
 
     /**
-     * Handle incoming camera frames
-     * @description
-     * The callback given to redis service handler, distributes frames to listeners
-     * and updates attributes for status endpoint
+     * Handle incoming camera frames from Redis Stream
      */
     private handleFrame(frame: CameraFrame): void {
-        const { cameraId, frameData, timestamp, serverTimestamp } = frame;
+        const { cameraId, frameData, timestamp } = frame;
 
         // Get or create camera state
         let state = this.cameraStates.get(cameraId);
@@ -68,41 +71,39 @@ export class CameraService {
             console.error(`Frame recording error for ${cameraId}:`, err);
         });
 
-        // Notify all listeners for this camera (only if there are any)
+        // Track FPS
+        this.frameCount++;
+        this.logFpsIfNeeded();
+
+        // Notify all listeners for this camera
         const listeners = this.frameListeners.get(cameraId);
         if (listeners && listeners.size > 0) {
-            // Track FPS only when there are active viewers
-            const count = (this.frameCounters.get(cameraId) ?? 0) + 1;
-            this.frameCounters.set(cameraId, count);
-            this.logFpsIfNeeded();
-
-            listeners.forEach(listener => listener(frameData, serverTimestamp));
+            listeners.forEach(listener => listener(frameData));
         }
     }
 
     /**
-     * Log FPS stats periodically (only when viewers are connected)
+     * Handle hole notification from Python brain
+     */
+    private handleHoleNotification(notification: HoleNotification): void {
+        console.log(`[HoleNotification] Hole detected at (${notification.x}, ${notification.y})`);
+
+        // Notify all hole listeners
+        this.holeListeners.forEach(listener => listener(notification));
+    }
+
+    /**
+     * Log FPS stats periodically
      */
     private logFpsIfNeeded(): void {
         const now = Date.now();
         const elapsed = now - this.lastFpsLog;
 
-        // Log every 5 seconds
         if (elapsed >= 5000) {
-            const stats: string[] = [];
+            const fps = ((this.frameCount / elapsed) * 1000).toFixed(1);
+            console.log(`[CameraService] ${fps} FPS (${this.frameCount} frames in ${(elapsed / 1000).toFixed(1)}s)`);
 
-            for (const [cameraId, count] of this.frameCounters.entries()) {
-                const fps = ((count / elapsed) * 1000).toFixed(1);
-                const viewerCount = this.frameListeners.get(cameraId)?.size ?? 0;
-                stats.push(`${cameraId}: ${fps} FPS (${viewerCount} viewers)`);
-            }
-
-            if (stats.length > 0) {
-                console.log(`[CameraService] Frame stats: ${stats.join(', ')}`);
-            }
-
-            // Reset counters
-            this.frameCounters.clear();
+            this.frameCount = 0;
             this.lastFpsLog = now;
         }
     }
@@ -112,6 +113,14 @@ export class CameraService {
      */
     getAvailableCameras(): string[] {
         return Array.from(this.cameraStates.keys());
+    }
+
+    /**
+     * Discover available streams and return camera IDs
+     * This scans Redis for streams matching the pattern
+     */
+    async discoverCameras(): Promise<string[]> {
+        return await this.redisManager.discoverStreams();
     }
 
     /**
@@ -144,41 +153,44 @@ export class CameraService {
     }
 
     /**
-     * @description Subscribe to frames for a specific camera
-     * Increment viewer count, and provide routine to unsubscribe
-     * @returns a callback function to unsubscribe
+     * Subscribe to frames for a specific camera
      */
     subscribeToCamera(cameraId: string, listener: FrameListener): () => void {
-        // Get or create listeners set for this camera
         let listeners = this.frameListeners.get(cameraId);
         if (!listeners) {
             listeners = new Set();
             this.frameListeners.set(cameraId, listeners);
         }
 
-        // Add the listener
         listeners.add(listener);
 
-        // Increment viewer count
         const state = this.cameraStates.get(cameraId);
         if (state) {
             state.viewerCount++;
         }
 
-        // Return unsubscribe function
         return () => {
             listeners?.delete(listener);
 
-            // Decrement viewer count
             const state = this.cameraStates.get(cameraId);
             if (state && state.viewerCount > 0) {
                 state.viewerCount--;
             }
 
-            // Clean up empty listener sets
             if (listeners?.size === 0) {
                 this.frameListeners.delete(cameraId);
             }
+        };
+    }
+
+    /**
+     * Subscribe to hole notifications
+     */
+    subscribeToHoleNotifications(listener: HoleListener): () => void {
+        this.holeListeners.add(listener);
+
+        return () => {
+            this.holeListeners.delete(listener);
         };
     }
 
