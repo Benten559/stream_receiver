@@ -3,9 +3,9 @@
  * Extends EventTarget to emit custom events for frame arrivals
  */
 
-import type { RawFrame } from '../types/streaming.types.js';
+import type { IStreamClient, RawFrame } from '../types/streaming.types.js';
 
-export class SSEStreamClient extends EventTarget {
+export class SSEStreamClient extends EventTarget implements IStreamClient{
   private cameraId: string;
   private eventSource: EventSource | null = null;
   private reconnectDelay: number = 1000;
