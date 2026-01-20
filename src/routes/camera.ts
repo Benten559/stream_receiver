@@ -82,8 +82,8 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
 
     console.log(`Client connected to MJPEG stream: ${cameraId}`);
 
-    // Subscribe to camera frames
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
+    // Subscribe to camera frames (serverTimestamp not used for MJPEG)
+    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer, _serverTimestamp: number) => {
         // Check if response is still writable before attempting write
         if (!res.writable) {
             console.log(`Response not writable for ${cameraId}, unsubscribing`);
@@ -157,7 +157,7 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
     console.log(`Client connected to SSE stream: ${cameraId}`);
 
     // Subscribe to camera frames
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
+    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer, serverTimestamp: number) => {
         // Check if response is still writable BEFORE attempting write
         if (!res.writable) {
             console.log(`SSE response not writable for ${cameraId}, unsubscribing`);
@@ -169,8 +169,14 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
             // Convert frame to base64 for transmission
             const base64Frame = frameData.toString('base64');
 
+            // Send JSON with frame data AND server timestamp for accurate age detection
+            const framePayload = JSON.stringify({
+                data: base64Frame,
+                serverTimestamp,
+            });
+
             res.write(`event: frame\n`);
-            res.write(`data: ${base64Frame}\n\n`);
+            res.write(`data: ${framePayload}\n\n`);
         } catch (err) {
             console.error(`Error writing SSE frame for camera ${cameraId}:`, err);
             unsubscribe();
@@ -181,8 +187,13 @@ cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
     if (initialFrame) {
         try {
             const base64Frame = initialFrame.toString('base64');
+            // Use current time for initial frame (it's being sent immediately)
+            const framePayload = JSON.stringify({
+                data: base64Frame,
+                serverTimestamp: Date.now(),
+            });
             res.write(`event: frame\n`);
-            res.write(`data: ${base64Frame}\n\n`);
+            res.write(`data: ${framePayload}\n\n`);
         } catch (err) {
             console.error(`Error writing initial SSE frame for camera ${cameraId}:`, err);
             unsubscribe();

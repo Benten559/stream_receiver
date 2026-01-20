@@ -155,12 +155,13 @@ export class FeatureManager {
       return;
     }
 
-    // DROP FRAME if too old (prevent displaying stale frames)
-    const frameAge = Date.now() - rawFrame.timestamp;
-    if (frameAge > 500) {  // Drop frames older than 500ms
+    // DROP FRAME if too old (using SERVER timestamp for accurate age detection!)
+    // This catches frames that were delayed in Redis/SSE pipeline, not just browser processing
+    const frameAge = Date.now() - rawFrame.serverTimestamp;
+    if (frameAge > 500) {  // Drop frames older than 500ms from when server received them
       this.droppedFrames++;
       if (frameAge > 1000 && this.droppedFrames % 10 === 0) {
-        console.warn(`[FrameManager] Dropping old frames! Age: ${frameAge}ms - processing too slow!`);
+        console.warn(`[FrameManager] Dropping old frames! Server age: ${frameAge}ms - pipeline backlog!`);
       }
       this.logDropStats();
       return;

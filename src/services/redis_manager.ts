@@ -12,10 +12,6 @@ export class RedisManager {
     private isConnected: boolean = false;
     private frameCallback?: (frame: CameraFrame) => void;
 
-    // Frame statistics
-    private frameCount: number = 0;
-    private lastFrameLog: number = Date.now();
-
     // Track if we've subscribed
     private isSubscribed: boolean = false;
 
@@ -136,9 +132,12 @@ export class RedisManager {
      * Handle incoming messages from Redis
      * @description
      * Extract camera ID from channel name (e.g., "camera_stream:cam1" -> "cam1")
-     * Validates JPEG format and logs frame statistics
+     * Validates JPEG format and passes frame to callback with server timestamp
      */
     private handleMessage(message: Buffer, channel: string): void {
+        // Capture server timestamp immediately when frame arrives from Redis
+        const serverTimestamp = Date.now();
+
         const cameraId = this.extractCameraId(channel);
 
         if (!cameraId) {
@@ -164,31 +163,11 @@ export class RedisManager {
             return;
         }
 
-        // Log frame stats every 100 frames
-        if (!this.frameCount) {
-            this.frameCount = 0;
-            this.lastFrameLog = Date.now();
-        }
-        this.frameCount++;
-
-        if (this.frameCount % 100 === 0) {
-            const now = Date.now();
-            const elapsed = (now - this.lastFrameLog) / 1000;
-            const fps = (100 / elapsed).toFixed(1);
-            const avgSize = (message.length / 1024).toFixed(1);
-
-            console.log(
-                `[Redis] ${cameraId}: ${this.frameCount} frames received, ` +
-                `${fps} FPS, ${avgSize} KB avg`
-            );
-
-            this.lastFrameLog = now;
-        }
-
         const frame: CameraFrame = {
             cameraId,
             frameData: message,
             timestamp: new Date(),
+            serverTimestamp,
         };
 
         if (this.frameCallback) {

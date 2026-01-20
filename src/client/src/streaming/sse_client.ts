@@ -99,14 +99,30 @@ export class SSEStreamClient extends EventTarget {
   }
 
   /**
-   * Handle incoming frame data
+   * Handle incoming frame data (JSON payload with serverTimestamp)
    */
   private handleFrame(event: MessageEvent): void {
     try {
-      const base64Data = event.data;
+      const jsonData = event.data;
 
-      if (!base64Data || typeof base64Data !== 'string') {
-        console.error('[SSE] Invalid frame data received:', typeof base64Data);
+      if (!jsonData || typeof jsonData !== 'string') {
+        console.error('[SSE] Invalid frame data received:', typeof jsonData);
+        return;
+      }
+
+      // Parse JSON payload from server
+      let payload: { data: string; serverTimestamp: number };
+      try {
+        payload = JSON.parse(jsonData);
+      } catch {
+        console.error('[SSE] Failed to parse frame JSON:', jsonData.substring(0, 50));
+        return;
+      }
+
+      const { data: base64Data, serverTimestamp } = payload;
+
+      if (!base64Data) {
+        console.error('[SSE] Missing base64 data in frame payload');
         return;
       }
 
@@ -123,6 +139,7 @@ export class SSEStreamClient extends EventTarget {
       const rawFrame: RawFrame = {
         base64Data,
         timestamp: Date.now(),
+        serverTimestamp,
       };
 
       // Emit custom frame event with detail

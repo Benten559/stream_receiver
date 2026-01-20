@@ -4,13 +4,17 @@ import { FrameRecorder } from './frame_recorder.ts';
 import type { CameraFrame, CameraState } from '../types/camera.types.ts';
 import { initializeConfig } from '../config/index.ts';
 
-type FrameListener = (frame : Buffer) => void;
+type FrameListener = (frame: Buffer, serverTimestamp: number) => void;
 
 export class CameraService {
     private redisManager: RedisManager;
     private cameraStates: Map<string, CameraState> = new Map();
     private frameListeners : Map<string, Set<FrameListener>> = new Map();
     private frameRecorder: FrameRecorder;
+
+    // FPS tracking (only logged when viewers are connected)
+    private frameCounters: Map<string, number> = new Map();
+    private lastFpsLog: number = Date.now();
 
     constructor() {
         this.redisManager = new RedisManager();
@@ -33,12 +37,12 @@ export class CameraService {
 
     /**
      * Handle incoming camera frames
-     * @description 
+     * @description
      * The callback given to redis service handler, distributes frames to listeners
      * and updates attributes for status endpoint
      */
     private handleFrame(frame: CameraFrame): void {
-        const { cameraId, frameData, timestamp } = frame;
+        const { cameraId, frameData, timestamp, serverTimestamp } = frame;
 
         // Get or create camera state
         let state = this.cameraStates.get(cameraId);
@@ -64,10 +68,42 @@ export class CameraService {
             console.error(`Frame recording error for ${cameraId}:`, err);
         });
 
-        // Notify all listeners for this camera
+        // Notify all listeners for this camera (only if there are any)
         const listeners = this.frameListeners.get(cameraId);
-        if (listeners) {
-            listeners.forEach(listener => listener(frameData));
+        if (listeners && listeners.size > 0) {
+            // Track FPS only when there are active viewers
+            const count = (this.frameCounters.get(cameraId) ?? 0) + 1;
+            this.frameCounters.set(cameraId, count);
+            this.logFpsIfNeeded();
+
+            listeners.forEach(listener => listener(frameData, serverTimestamp));
+        }
+    }
+
+    /**
+     * Log FPS stats periodically (only when viewers are connected)
+     */
+    private logFpsIfNeeded(): void {
+        const now = Date.now();
+        const elapsed = now - this.lastFpsLog;
+
+        // Log every 5 seconds
+        if (elapsed >= 5000) {
+            const stats: string[] = [];
+
+            for (const [cameraId, count] of this.frameCounters.entries()) {
+                const fps = ((count / elapsed) * 1000).toFixed(1);
+                const viewerCount = this.frameListeners.get(cameraId)?.size ?? 0;
+                stats.push(`${cameraId}: ${fps} FPS (${viewerCount} viewers)`);
+            }
+
+            if (stats.length > 0) {
+                console.log(`[CameraService] Frame stats: ${stats.join(', ')}`);
+            }
+
+            // Reset counters
+            this.frameCounters.clear();
+            this.lastFpsLog = now;
         }
     }
 

@@ -7,7 +7,10 @@
  */
 export interface RawFrame {
   base64Data: string;
+  /** Client-side timestamp when frame was received */
   timestamp: number;
+  /** Server-side timestamp when frame arrived at Redis (for accurate age detection) */
+  serverTimestamp: number;
 }
 
 /**
