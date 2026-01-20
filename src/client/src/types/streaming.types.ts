@@ -78,3 +78,33 @@ export interface FeatureToggleEvent extends Event {
     enabled: boolean;
   };
 }
+
+/**
+ * Common interface for all stream providers (SSE, MJPEG, WebSockets)
+ */
+export interface IStreamClient extends EventTarget {
+  connect(): void;
+  disconnect(): void;
+}
+
+/**
+ * Raw frame data received from binary MJPEG endpoint
+ */
+export interface BinaryFrame {
+  image: HTMLImageElement;
+  /** Client-side timestamp when frame was received */
+  timestamp: number;
+  /** 
+   * Note: MJPEG headers usually don't include server timestamps 
+   * unless custom headers are parsed manually.
+   */
+  serverTimestamp?: number;
+}
+
+/**
+ * Union type for frame events to simplify event handling
+ */
+export type StreamFrameEvent = CustomEvent<RawFrame | BinaryFrame>;
+
+// To support both
+export type FrameSource = ImageData | HTMLImageElement | ImageBitmap;

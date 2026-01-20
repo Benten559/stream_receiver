@@ -67,37 +67,16 @@ export class CanvasRenderer {
    * @param base64Data - Base64 encoded JPEG data
    * @returns Promise<ImageData>
    */
-  async decodeFrame(base64Data: string): Promise<ImageData> {
+  async decodeFrame(base64Data: string): Promise<HTMLImageElement> {
     try {
+      // Just return the image element created by createTempImage
       const img = await this.createTempImage(base64Data);
-
-      // Create temporary canvas for decoding
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = img.width;
-      tempCanvas.height = img.height;
-
-      const tempCtx = tempCanvas.getContext('2d');
-      if (!tempCtx) {
-        throw new Error('Failed to get 2D context for temp canvas');
-      }
-
-      // Draw image to temp canvas
-      tempCtx.drawImage(img, 0, 0);
-
-      // Extract ImageData
-      const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
-
-      return imageData;
+      return img;
     } catch (error) {
-      const preview = base64Data.substring(0, 20);
-      console.error(
-        `[CanvasRenderer] JPEG decode failed: ${error}`,
-        `Base64 length: ${base64Data.length}, Preview: ${preview}...`
-      );
+      console.error(`[CanvasRenderer] JPEG decode failed: ${error}`);
       throw error;
     }
   }
-
   /**
    * Create temporary image element from base64 data
    * @param base64Data - Base64 encoded JPEG
@@ -133,19 +112,36 @@ export class CanvasRenderer {
   }
 
   /**
-   * Render ImageData to canvas
-   * @param imageData - ImageData to render
+   * Render ImageData or HTMLImageElement to canvas
+   * Automatically resizes canvas to match source dimensions
    */
-  renderFrame(imageData: ImageData): void {
-    // Resize canvas if needed
-    if (this.canvas.width !== imageData.width || this.canvas.height !== imageData.height) {
-      this.canvas.width = imageData.width;
-      this.canvas.height = imageData.height;
-    }
+  renderFrame(source: ImageData | HTMLImageElement): void {
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return;
 
-    // Render frame
-    this.ctx.putImageData(imageData, 0, 0);
+    if (source instanceof ImageData) {
+      // Resize canvas to match ImageData
+      if (this.canvas.width !== source.width || this.canvas.height !== source.height) {
+        this.canvas.width = source.width;
+        this.canvas.height = source.height;
+      }
+      ctx.putImageData(source, 0, 0);
+    } else {
+      // HTMLImageElement - resize canvas to match image dimensions
+      const imgWidth = source.naturalWidth || source.width;
+      const imgHeight = source.naturalHeight || source.height;
+
+      if (imgWidth > 0 && imgHeight > 0) {
+        if (this.canvas.width !== imgWidth || this.canvas.height !== imgHeight) {
+          this.canvas.width = imgWidth;
+          this.canvas.height = imgHeight;
+          console.log(`[CanvasRenderer] Canvas resized to ${imgWidth}x${imgHeight}`);
+        }
+        ctx.drawImage(source, 0, 0);
+      }
+    }
   }
+
 
   /**
    * Get the canvas element
