@@ -1,9 +1,8 @@
 import type { AvailableCamerasResponse } from '../../types/api.types.js';
-import { SSEStreamClient } from './streaming/sse_client.js';
 import { CanvasRenderer } from './streaming/canvas_renderer.js';
 import { MJPEGStreamClient } from './streaming/MJPEGStreamClient.js';
 import { setupRecordingControls } from './features/frame_recording_controls.js';
-import type { BinaryFrame, IStreamClient, RawFrame } from './types/streaming.types.js';
+import type { BinaryFrame, IStreamClient } from './types/streaming.types.js';
 
 // Track current stream
 let currentStreamClient: IStreamClient | null = null;
@@ -173,95 +172,6 @@ function renderCameraButtons(cameras: string[]): void {
     const button = createCameraButton(cameraId);
     container.appendChild(button);
   });
-}
-
-/**
- * Start SSE or MJPEG stream for a camera
- * Currently supports base64encoded data or raw binary from cam
- */
-function startSSEStream(cameraId: string): void {
-  const streamViewElement = document.getElementById('stream-viewer');
-
-  if (!streamViewElement) {
-    console.error('stream-viewer element not found!');
-    return;
-  }
-
-  // Cleanup previous stream
-  cleanupCurrentStream();
-
-  // Clear container
-  streamViewElement.innerHTML = '';
-
-  try {
-    // Create canvas renderer
-    currentRenderer = new CanvasRenderer(
-      'stream-viewer',
-      cameraId,
-      `Camera: ${cameraId}`
-    );
-
-    // Create SSE client for video frames
-    currentStreamClient = new SSEStreamClient(cameraId);
-
-    currentStreamClient.addEventListener('frame', async (event: Event) => {
-
-      // Event can be either b64 encoded for sse or pure binary for mjpeg
-      const customEvent = event as CustomEvent<RawFrame | BinaryFrame>;
-      const frame = customEvent.detail;
-
-      try {
-        let sourceToRender: HTMLImageElement | ImageData | null = null;
-
-        // Check if it's SSE (base64Data) or MJPEG (image)
-        if ('base64Data' in frame) {
-          // SSE path: Needs manual decoding
-          sourceToRender = await currentRenderer!.decodeFrame(frame.base64Data);
-        } else if ('image' in frame) {
-          // MJPEG path: Already a decoded HTMLImageElement
-          sourceToRender = frame.image;
-        }
-
-        if (sourceToRender) {
-          currentRenderer!.renderFrame(sourceToRender);
-          drawDetectedHoles(); // Both perform overlay draw
-        } else {
-          console.warn("No renderable image data found in frame");
-        }
-
-      } catch (error) {
-        console.error('Failed to render frame:', error);
-      }
-    });
-
-
-    // Handle connection events
-    currentStreamClient.addEventListener('connected', () => {
-      console.log(`Connected to camera: ${cameraId}`);
-    });
-
-    currentStreamClient.addEventListener('disconnected', () => {
-      console.log(`Disconnected from camera: ${cameraId}`);
-    });
-
-    currentStreamClient.addEventListener('error', (event: Event) => {
-      console.error('SSE connection error:', event);
-      showError(streamViewElement, `Failed to stream camera: ${cameraId}`);
-    });
-
-    // Connect to stream
-    currentStreamClient.connect();
-
-    // Start listening for hole notifications
-    startHoleNotificationListener();
-
-    // Add recording controls button
-    addRecordingButton();
-
-  } catch (error) {
-    console.error('Failed to start SSE stream:', error);
-    showError(streamViewElement, `Failed to initialize stream for camera: ${cameraId}`);
-  }
 }
 
 /**
