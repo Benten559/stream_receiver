@@ -154,54 +154,6 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
 });
 
 /**
- * GET /camera/stream/:cameraId/sse
- * Server-Sent Events endpoint (JSON Base64)
- */
-cameraRouter.get('/stream/:cameraId/sse', (req: Request, res: Response) => {
-    const { cameraId } = req.params;
-
-    if (!cameraId) {
-        res.status(400).json({ error: 'Camera ID is required' });
-        return;
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    res.write(': connected\n\n');
-
-    const sendFrame = (frameData: Buffer) => {
-        if (!res.writable) return;
-
-        try {
-            const base64Frame = frameData.toString('base64');
-
-            const payload = JSON.stringify({
-                data: base64Frame,
-                serverTimestamp: Date.now()
-            });
-
-            res.write(`event: frame\n`);
-            res.write(`data: ${payload}\n\n`);
-        } catch (err) {
-            console.error(`Error writing SSE frame for ${cameraId}:`, err);
-        }
-    };
-
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, sendFrame);
-
-    const initialFrame = cameraService.getLatestFrame(cameraId);
-    if (initialFrame) sendFrame(initialFrame);
-
-    req.on('close', () => {
-        unsubscribe();
-        res.end();
-    });
-});
-
-/**
  * GET /camera/holes/sse
  */
 cameraRouter.get('/holes/sse', (req: Request, res: Response) => {
