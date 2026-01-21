@@ -1,4 +1,3 @@
-// src/services/redis_manager.ts
 import { Redis } from 'ioredis';
 import { initializeConfig } from '../config/index.ts';
 import type { CameraFrame } from '../types/camera.types.ts';
@@ -10,7 +9,6 @@ export interface HoleNotification {
 }
 
 export class RedisManager {
-    // ioredis clients
     private streamClient: Redis;
     private pubsubClient: Redis;
     private scanClient: Redis;
@@ -24,16 +22,16 @@ export class RedisManager {
 
     private activeStreams: Map<string, string> = new Map();
     private discoveryInterval: NodeJS.Timeout | null = null;
-
-    // Debug flag
     private loggedFirstFrame: boolean = false;
+
+    // FPS for debugging
+    private frameCount: number = 0;
+    private lastLogTime: number = Date.now();
 
     constructor() {
         const redisConfig = {
             host: this.config.redis.host,
             port: this.config.redis.port,
-            // ioredis returns Buffers by default for binary data
-            // but we can also explicitly request it
             retryStrategy: (times: number) => {
                 if (times > 10) {
                     console.error('Redis: Max reconnection attempts reached');
@@ -71,7 +69,6 @@ export class RedisManager {
 
     async connect(): Promise<void> {
         try {
-            // ioredis connects automatically, but we wait for ready
             await Promise.all([
                 this.waitForReady(this.streamClient),
                 this.waitForReady(this.pubsubClient),
@@ -82,6 +79,7 @@ export class RedisManager {
 
             await this.subscribeToHoleNotifications();
             await this.discoverStreams();
+            await this.clearOldFrames();
             this.startStreamDiscovery();
             this.startStreamReader();
         } catch (error) {
@@ -108,7 +106,6 @@ export class RedisManager {
         try {
             let cursor = '0';
             do {
-                // ioredis scanStream or manual scan
                 const [newCursor, keys] = await this.scanClient.scan(
                     cursor,
                     'MATCH', pattern,
@@ -122,11 +119,10 @@ export class RedisManager {
             for (const streamName of discoveredStreams) {
                 if (!this.activeStreams.has(streamName)) {
                     this.activeStreams.set(streamName, '$');
-                    console.log(`Discovered stream: ${streamName}`);
+                    console.log(`Discovered stream: ${streamName} starting from latest`);
                 }
             }
 
-            // Return extracted camera IDs
             const cameraIds: string[] = [];
             for (const streamName of this.activeStreams.keys()) {
                 const cameraId = this.extractCameraId(streamName) || streamName;
@@ -136,6 +132,20 @@ export class RedisManager {
         } catch (e) {
             console.error('Stream discovery error:', e);
             return [];
+        }
+    }
+
+    /**
+     * On a fresh connection anything buffered will be trimmed off
+     */
+    private async clearOldFrames(): Promise<void> {
+        try {
+            for (const streamName of this.activeStreams.keys()) {
+                await this.streamClient.xtrim(streamName, 'MAXLEN', 1);
+                console.log(`[RedisManager] Cleared old frames from ${streamName}`);
+            }
+        } catch (error) {
+            console.error('Failed to clear old frames:', error);
         }
     }
 
@@ -169,6 +179,9 @@ export class RedisManager {
         }
     }
 
+    /**
+     * XREVRANGE to always get the absolute latest frame
+     */
     private async startStreamReader(): Promise<void> {
         if (this.isReading) return;
         this.isReading = true;
@@ -182,43 +195,55 @@ export class RedisManager {
                     continue;
                 }
 
-                // Build XREAD arguments for ioredis
-                // Format: XREAD BLOCK ms COUNT n STREAMS key1 key2 ... id1 id2 ...
-                const keys = Array.from(this.activeStreams.keys());
-                const ids = Array.from(this.activeStreams.values());
+                for (const streamName of this.activeStreams.keys()) {
+                    try {
+                        // Get the LAST entry in the stream (most recent)
+                        const entries = await this.streamClient.xrevrangeBuffer(
+                            streamName,
+                            '+',    // End (most recent)
+                            '-',    // Start (oldest)
+                            'COUNT', 1  // Only get 1
+                        ) as [Buffer, Buffer[]][];
 
-                // Use xreadBuffer to get binary data as Buffers
-                // ioredis signature: xreadBuffer('BLOCK', ms, 'COUNT', n, 'STREAMS', ...keys, ...ids)
-                const response = await this.streamClient.xreadBuffer(
-                    'COUNT', 1,
-                    'BLOCK', 1000,
-                    'STREAMS', ...keys, ...ids
-                ) as [Buffer, [Buffer, Buffer[]][]][] | null;
+                        // Did that result in an entry being retrieved?
+                        if (entries && entries.length > 0) {
+                            const firstEntry = entries[0];
+                            
+                            // Is there data available?
+                            if (firstEntry) {
+                                const [entryIdBuf, fields] = firstEntry;
+                                const entryId = entryIdBuf.toString();
 
-                if (response) {
-                    // ioredis xreadBuffer returns: [[streamName, [[entryId, [field, value, ...]]]]]
-                    for (const [streamNameBuf, entries] of response) {
-                        const streamName = streamNameBuf.toString();
+                                // Is this a new frame?
+                                const lastProcessedId = this.activeStreams.get(streamName);
+                                if (entryId !== lastProcessedId) {
+                                    const message: Record<string, Buffer> = {};
+                                    for (let i = 0; i < fields.length; i += 2) {
+                                        const fieldName = fields[i];
+                                        const fieldValue = fields[i + 1];
+                                        
+                                        // Does it have the expected attributes?
+                                        if (fieldName && fieldValue) {
+                                            message[fieldName.toString()] = fieldValue;
+                                        }
+                                    }
 
-                        for (const [entryIdBuf, fields] of entries) {
-                            const entryId = entryIdBuf.toString();
-
-                            // fields is [field1, value1, field2, value2, ...]
-                            const message: Record<string, Buffer> = {};
-                            for (let i = 0; i < fields.length; i += 2) {
-                                const fieldName = fields[i]!.toString();
-                                const fieldValue = fields[i + 1]!; // Keep as Buffer
-                                message[fieldName] = fieldValue;
+                                    this.handleStreamEntry(streamName, entryId, message);
+                                    this.activeStreams.set(streamName, entryId);
+                                }
                             }
-
-                            this.handleStreamEntry(streamName, entryId, message);
-                            this.activeStreams.set(streamName, entryId);
                         }
+                    } catch (streamError) {
+                        console.error(`Error reading stream ${streamName}:`, streamError);
                     }
                 }
+
+                // Small delay to prevent CPU hammering ~30 FPS
+                await new Promise(r => setTimeout(r, 33));
+
             } catch (error) {
                 if (this.isReading) {
-                    console.error('[RedisManager] XREAD Error:', error);
+                    console.error('[RedisManager] Stream reader error:', error);
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
@@ -244,7 +269,16 @@ export class RedisManager {
             console.log(`[RedisManager] First frame: isBuffer=${isBuffer}, length=${frameData.length}, header=${header}, validJPEG=${isValidJPEG}`);
         }
 
-        // Extract camera ID from stream name
+        // Log frame rate every 2 seconds
+        this.frameCount++;
+        const now = Date.now();
+        if (now - this.lastLogTime >= 2000) {
+            const fps = this.frameCount / ((now - this.lastLogTime) / 1000);
+            console.log(`[RedisManager] Consumer FPS: ${fps.toFixed(1)}`);
+            this.frameCount = 0;
+            this.lastLogTime = now;
+        }
+
         const cameraId = this.extractCameraId(streamName) || streamName;
 
         if (this.frameCallback) {

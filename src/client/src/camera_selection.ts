@@ -51,12 +51,24 @@ function createCameraButton(cameraId: string): HTMLButtonElement {
 /**
  * Start MJPEG stream for a camera
  */
+// DEBUGGING VERSION - Add this to your camera_selection.ts
+// This will tell us EXACTLY where the bottleneck is
+
 function startMJPEGStream(cameraId: string): void {
   const streamViewElement = document.getElementById('stream-viewer');
   if (!streamViewElement) return;
 
   cleanupCurrentStream();
   streamViewElement.innerHTML = '';
+
+  // DEBUG COUNTERS
+  let framesReceived = 0;
+  let framesRendered = 0;
+  let framesDropped = 0;
+  let renderTimeTotal = 0;
+  let lastDebugLog = Date.now();
+  
+  let isProcessingFrame = false;
 
   try {
     currentRenderer = new CanvasRenderer(
@@ -65,28 +77,38 @@ function startMJPEGStream(cameraId: string): void {
       `Camera: ${cameraId}`
     );
 
-    // Swap SSE for MJPEG
     currentStreamClient = new MJPEGStreamClient(cameraId);
 
-    // Handle incoming MJPEG frames
+    // Handle incoming MJPEG frames WITH DETAILED LOGGING
     currentStreamClient.addEventListener('frame', async (event: Event) => {
+      framesReceived++;
+      
       const customEvent = event as CustomEvent;
       const data = customEvent.detail;
 
       if (!data) return;
 
+      // Frame dropping
+      if (isProcessingFrame) {
+        framesDropped++;
+        return;
+      }
+
+      isProcessingFrame = true;
+      const renderStart = performance.now();
+
       try {
-        // CASE 1: MJPEG (The data object HAS an image property)
         if (data.image && data.image instanceof HTMLImageElement) {
           currentRenderer!.renderFrame(data.image);
           drawDetectedHoles();
+          framesRendered++;
         }
-        // CASE 2: SSE (The data object HAS base64Data)
         else if (data.base64Data) {
           const imgData = await currentRenderer!.decodeFrame(data.base64Data);
           if (imgData) {
             currentRenderer!.renderFrame(imgData);
             drawDetectedHoles();
+            framesRendered++;
           }
         }
         else {
@@ -94,9 +116,36 @@ function startMJPEGStream(cameraId: string): void {
         }
       } catch (error) {
         console.error('Failed to render frame:', error);
+      } finally {
+        const renderEnd = performance.now();
+        renderTimeTotal += (renderEnd - renderStart);
+        isProcessingFrame = false;
+      }
+      
+      // Debug log every 2 seconds
+      const now = Date.now();
+      if (now - lastDebugLog >= 2000) {
+        const elapsed = (now - lastDebugLog) / 1000;
+        const receiveFps = framesReceived / elapsed;
+        const renderFps = framesRendered / elapsed;
+        const avgRenderTime = framesRendered > 0 ? renderTimeTotal / framesRendered : 0;
+        
+        console.debug('═══════════════════════════════════════');
+        console.debug(`[DEBUG] Frames received: ${receiveFps.toFixed(1)} FPS`);
+        console.debug(`[DEBUG] Frames rendered:  ${renderFps.toFixed(1)} FPS`);
+        console.debug(`[DEBUG] Frames dropped:   ${framesDropped}`);
+        console.debug(`[DEBUG] Avg render time:  ${avgRenderTime.toFixed(1)}ms`);
+        console.debug(`[DEBUG] Processing busy:  ${isProcessingFrame ? 'YES' : 'NO'}`);
+        console.debug('═══════════════════════════════════════');
+        
+        // Reset counters
+        framesReceived = 0;
+        framesRendered = 0;
+        framesDropped = 0;
+        renderTimeTotal = 0;
+        lastDebugLog = now;
       }
     });
-
 
     currentStreamClient.addEventListener('connected', () => console.log(`MJPEG Connected: ${cameraId}`));
     currentStreamClient.addEventListener('error', (e) => showError(streamViewElement, `MJPEG Error: ${cameraId}`));
@@ -127,7 +176,8 @@ function renderCameraButtons(cameras: string[]): void {
 }
 
 /**
- * Start SSE stream for a camera
+ * Start SSE or MJPEG stream for a camera
+ * Currently supports base64encoded data or raw binary from cam
  */
 function startSSEStream(cameraId: string): void {
   const streamViewElement = document.getElementById('stream-viewer');
@@ -155,14 +205,15 @@ function startSSEStream(cameraId: string): void {
     currentStreamClient = new SSEStreamClient(cameraId);
 
     currentStreamClient.addEventListener('frame', async (event: Event) => {
-      // Use the Union Type we defined
+
+      // Event can be either b64 encoded for sse or pure binary for mjpeg
       const customEvent = event as CustomEvent<RawFrame | BinaryFrame>;
       const frame = customEvent.detail;
 
       try {
         let sourceToRender: HTMLImageElement | ImageData | null = null;
 
-        // BRANCHING LOGIC: Check if it's SSE (base64Data) or MJPEG (image)
+        // Check if it's SSE (base64Data) or MJPEG (image)
         if ('base64Data' in frame) {
           // SSE path: Needs manual decoding
           sourceToRender = await currentRenderer!.decodeFrame(frame.base64Data);
@@ -198,7 +249,7 @@ function startSSEStream(cameraId: string): void {
       showError(streamViewElement, `Failed to stream camera: ${cameraId}`);
     });
 
-    // Connect to SSE stream
+    // Connect to stream
     currentStreamClient.connect();
 
     // Start listening for hole notifications
@@ -214,7 +265,7 @@ function startSSEStream(cameraId: string): void {
 }
 
 /**
- * Start listening for hole detection notifications from Python brain
+ * Start listening for hole detection notifications from the algo brain
  */
 function startHoleNotificationListener(): void {
   // Close existing listener
