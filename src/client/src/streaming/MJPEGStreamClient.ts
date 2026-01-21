@@ -2,8 +2,8 @@ import { IStreamClient } from "../types/streaming.types";
 
 /**
  * MJPEG Stream Client
- * Uses an <img> element to display MJPEG stream from server.
- * Uses requestAnimationFrame to continuously emit frame events for canvas rendering.
+ * Only emits frame events when the image actually changes
+ * This prevents rendering the same frame multiple times
  */
 export class MJPEGStreamClient extends EventTarget implements IStreamClient {
   private img: HTMLImageElement;
@@ -11,12 +11,16 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
   private isConnected: boolean = false;
   private animationFrameId: number | null = null;
   private imageReady: boolean = false;
-
+  
+  // Track last frame to detect changes
+  private lastFrameTime: number = 0;
+  private frameCount: number = 0;
+  private lastFpsLog: number = Date.now();
+  
   constructor(cameraId: string) {
     super();
     this.url = `/camera/stream/${cameraId}`;
     this.img = new Image();
-    // Allow cross-origin if needed
     this.img.crossOrigin = 'anonymous';
   }
 
@@ -24,12 +28,10 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
     this.isConnected = true;
     this.imageReady = false;
 
-    // onload fires once when the MJPEG stream starts
     this.img.onload = () => {
       if (!this.isConnected) return;
       console.log(`[MJPEG] Stream loaded: ${this.img.naturalWidth}x${this.img.naturalHeight}`);
       this.imageReady = true;
-      // Start the render loop once the image is ready
       this.startRenderLoop();
     };
 
@@ -40,28 +42,45 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
       }
     };
 
-    // Start the MJPEG stream
     this.img.src = this.url;
     this.dispatchEvent(new CustomEvent('connected'));
   }
 
   /**
-   * Continuously emit frame events using requestAnimationFrame.
-   * The browser updates the img element automatically for MJPEG streams,
-   * but we need to poll it to draw to canvas and overlay holes.
+   * Only emit frames at a limited rate to prevent overwhelming renderer
+   * Will limit the images being rendered to webpage to be 30 FPS mapx
    */
   private startRenderLoop() {
     const emitFrame = () => {
       if (!this.isConnected || !this.imageReady) return;
 
-      // Only emit if image has valid dimensions
-      if (this.img.naturalWidth > 0 && this.img.naturalHeight > 0) {
-        this.dispatchEvent(new CustomEvent('frame', {
-          detail: {
-            image: this.img,
-            timestamp: Date.now()
+      const now = performance.now();
+      
+      // Only emit frames every 33ms (~30 FPS max)
+      // This prevents emitting 60 FPS when RAF runs faster than MJPEG updates
+      if (now - this.lastFrameTime >= 33) {  // 30 FPS limit
+        
+        // Only emit if image has valid dimensions
+        if (this.img.naturalWidth > 0 && this.img.naturalHeight > 0) {
+          this.dispatchEvent(new CustomEvent('frame', {
+            detail: {
+              image: this.img,
+              timestamp: Date.now()
+            }
+          }));
+          
+          this.lastFrameTime = now;
+          this.frameCount++;
+          
+          // Log actual FPS every 2 seconds
+          const elapsed = Date.now() - this.lastFpsLog;
+          if (elapsed >= 2000) {
+            const fps = (this.frameCount / elapsed) * 1000;
+            console.debug(`[MJPEG] Emitting ${fps.toFixed(1)} FPS`);
+            this.frameCount = 0;
+            this.lastFpsLog = Date.now();
           }
-        }));
+        }
       }
 
       // Continue the loop
@@ -76,7 +95,6 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
     this.isConnected = false;
     this.imageReady = false;
 
-    // Stop the render loop
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
@@ -84,8 +102,7 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
 
     this.img.onload = null;
     this.img.onerror = null;
-    this.img.src = "";  // Terminate the stream
-
+    this.img.src = "";
     this.dispatchEvent(new CustomEvent('disconnected'));
   }
 }

@@ -1,6 +1,6 @@
 /**
  * Canvas rendering utilities for displaying camera frames
- * Handles base64 JPEG decoding and canvas rendering
+ * Handles base64 JPEG decoding and binary data streams for canvas rendering
  */
 
 export class CanvasRenderer {
@@ -10,9 +10,6 @@ export class CanvasRenderer {
   private cameraId: string;
   private label: string;
   private canvasContainer: HTMLDivElement;
-
-  // Decode stats (log every 100 frames to reduce console spam)
-  private decodeCount: number = 0;
 
   constructor(containerId: string, cameraId: string, label: string) {
     const container = document.getElementById(containerId);
@@ -24,17 +21,24 @@ export class CanvasRenderer {
     this.cameraId = cameraId;
     this.label = label;
 
-    // Create canvas wrapper
     this.canvasContainer = this.createCanvasContainer();
     this.canvas = this.createCanvasElement();
     this.canvasContainer.appendChild(this.canvas);
     this.container.appendChild(this.canvasContainer);
 
-    const ctx = this.canvas.getContext('2d');
+    const ctx = this.canvas.getContext('2d', {
+      // Turning off the alpha channel for better performance
+      alpha: false,
+      willReadFrequently: false
+    });
+    
     if (!ctx) {
       throw new Error('Failed to get 2D context from canvas');
     }
     this.ctx = ctx;
+
+    this.ctx.imageSmoothingEnabled = true;
+    this.ctx.imageSmoothingQuality = 'low';  // 'low' is fastest
   }
 
   /**
@@ -49,13 +53,9 @@ export class CanvasRenderer {
     labelDiv.textContent = this.label;
 
     wrapper.appendChild(labelDiv);
-
     return wrapper;
   }
 
-  /**
-   * Create canvas element
-   */
   private createCanvasElement(): HTMLCanvasElement {
     const canvas = document.createElement('canvas');
     canvas.id = `canvas-${this.cameraId}-${Date.now()}`;
@@ -64,109 +64,73 @@ export class CanvasRenderer {
 
   /**
    * Decode base64 JPEG to ImageData
-   * @param base64Data - Base64 encoded JPEG data
-   * @returns Promise<ImageData>
    */
-  async decodeFrame(base64Data: string): Promise<HTMLImageElement> {
-    try {
-      // Just return the image element created by createTempImage
-      const img = await this.createTempImage(base64Data);
-      return img;
-    } catch (error) {
-      console.error(`[CanvasRenderer] JPEG decode failed: ${error}`);
-      throw error;
+  async decodeFrame(base64Data: string): Promise<ImageData> {
+    const img = await this.createTempImage(base64Data);
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = img.width;
+    tempCanvas.height = img.height;
+
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) {
+      throw new Error('Failed to get 2D context for temp canvas');
     }
+
+    tempCtx.drawImage(img, 0, 0);
+    const imageData = tempCtx.getImageData(0, 0, img.width, img.height);
+
+    return imageData;
   }
-  /**
-   * Create temporary image element from base64 data
-   * @param base64Data - Base64 encoded JPEG
-   * @returns Promise<HTMLImageElement>
-   */
+
   private createTempImage(base64Data: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
       const img = new Image();
-
-      img.onload = () => {
-        this.decodeCount++;
-        // Log every 100 frames to reduce console spam
-        if (this.decodeCount % 100 === 0) {
-          console.log(`[CanvasRenderer] Decoded ${this.decodeCount} frames: ${img.width}x${img.height}, ${(base64Data.length / 1024).toFixed(1)} KB`);
-        }
-        resolve(img);
-      };
-
-      img.onerror = (error) => {
-        const preview = base64Data.substring(0, 50);
-        console.error(
-          `[CanvasRenderer] Image load error:`,
-          `Length: ${base64Data.length} bytes`,
-          `Preview: ${preview}...`,
-          error
-        );
-        reject(new Error(`Failed to load JPEG image: ${error}`));
-      };
-
-      // Set data URL
+      img.onload = () => resolve(img);
+      img.onerror = (error) => reject(new Error(`Failed to load image: ${error}`));
       img.src = `data:image/jpeg;base64,${base64Data}`;
     });
   }
 
   /**
-   * Render ImageData or HTMLImageElement to canvas
-   * Automatically resizes canvas to match source dimensions
+   * Render frame (accepts both ImageData and HTMLImageElement)
    */
   renderFrame(source: ImageData | HTMLImageElement): void {
-    const ctx = this.canvas.getContext('2d');
-    if (!ctx) return;
-
-    if (source instanceof ImageData) {
-      // Resize canvas to match ImageData
-      if (this.canvas.width !== source.width || this.canvas.height !== source.height) {
+    // Resize canvas ONLY if/when dimensions change
+    if (source instanceof HTMLImageElement) {
+      if (this.canvas.width !== source.naturalWidth || 
+          this.canvas.height !== source.naturalHeight) {
+        this.canvas.width = source.naturalWidth;
+        this.canvas.height = source.naturalHeight;
+      }
+      
+      // no ImageData conversion
+      this.ctx.drawImage(source, 0, 0);
+      
+    } else if (source instanceof ImageData) {
+      if (this.canvas.width !== source.width || 
+          this.canvas.height !== source.height) {
         this.canvas.width = source.width;
         this.canvas.height = source.height;
       }
-      ctx.putImageData(source, 0, 0);
-    } else {
-      // HTMLImageElement - resize canvas to match image dimensions
-      const imgWidth = source.naturalWidth || source.width;
-      const imgHeight = source.naturalHeight || source.height;
-
-      if (imgWidth > 0 && imgHeight > 0) {
-        if (this.canvas.width !== imgWidth || this.canvas.height !== imgHeight) {
-          this.canvas.width = imgWidth;
-          this.canvas.height = imgHeight;
-          console.log(`[CanvasRenderer] Canvas resized to ${imgWidth}x${imgHeight}`);
-        }
-        ctx.drawImage(source, 0, 0);
-      }
+      
+      // Put ImageData directly
+      this.ctx.putImageData(source, 0, 0);
     }
   }
 
-
-  /**
-   * Get the canvas element
-   */
   getCanvas(): HTMLCanvasElement {
     return this.canvas;
   }
 
-  /**
-   * Get the canvas context
-   */
   getContext(): CanvasRenderingContext2D {
     return this.ctx;
   }
 
-  /**
-   * Get canvas container div
-   */
   getCanvasContainer(): HTMLDivElement {
     return this.canvasContainer;
   }
 
-  /**
-   * Destroy canvas and remove from DOM
-   */
   destroy(): void {
     if (this.canvasContainer && this.canvasContainer.parentNode) {
       this.canvasContainer.parentNode.removeChild(this.canvasContainer);
