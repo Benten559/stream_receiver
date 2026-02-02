@@ -1,40 +1,30 @@
-# Use Node.js 20 Alpine image optimized for Raspberry Pi (ARM64)
 FROM node:20-alpine
 
-# Set working directory
 WORKDIR /app
 
-# Copy package files for dependency installation
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+RUN npm install
 
-# Install TypeScript and ts-node for runtime compilation
+# 2. Install global tools
 RUN npm install -g typescript ts-node
 
-# Copy source code
 COPY . .
 
-# Build the TypeScript application
 RUN npm run build
 
-# Expose the server port
-EXPOSE 8000
+RUN mkdir -p /data/frames && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S stream -u 1001 && \
+    chown -R stream:nodejs /app /data
 
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S stream -u 1001
+RUN npm prune --production
 
-# Change ownership of the app directory
-RUN chown -R stream:nodejs /app
-
-# Switch to non-root user
 USER stream
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+EXPOSE 5000
 
-# Start the application
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:5000/health || exit 1
+
 CMD ["npm", "start"]

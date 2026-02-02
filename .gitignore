@@ -177,3 +177,4 @@ server_config_files/
 
 # Frame recorder default path
 data/
+local_data/
