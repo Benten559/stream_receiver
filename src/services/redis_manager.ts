@@ -195,28 +195,38 @@ export class RedisManager {
 
         while (this.isReading && this.isConnected) {
             try {
-                // Provide all streams and all corresponding IDs
                 const data = await this.streamClient.xreadBuffer(
-                    'BLOCK', 0,
                     'COUNT', 1,
+                    'BLOCK', 0,
                     'STREAMS', ...streamsToRead, ...lastIds
                 );
 
                 if (data) {
                     for (const [streamNameBuffer, entries] of data) {
                         const streamName = streamNameBuffer.toString();
-                        const [idBuffer, fields] = entries[0];
 
-                        // Update the specific lastId for this stream
-                        const streamIndex = streamsToRead.indexOf(streamName);
-                        if (streamIndex !== -1) lastIds[streamIndex] = idBuffer.toString();
+                        // Check if entries array has items before destructuring
+                        if (entries.length > 0) {
+                            const entry = entries[0];
+                            if (entry) {
+                                const [idBuffer, fields] = entry;
 
-                        const message: Record<string, Buffer> = {};
-                        for (let i = 0; i < fields.length; i += 2) {
-                            message[fields[i].toString()] = fields[i + 1];
+                                // Update the specific lastId for this stream
+                                const streamIndex = streamsToRead.indexOf(streamName);
+                                if (streamIndex !== -1) lastIds[streamIndex] = idBuffer.toString();
+
+                                const message: Record<string, Buffer> = {};
+                                for (let i = 0; i < fields.length; i += 2) {
+                                    const key = fields[i];
+                                    const value = fields[i + 1];
+                                    if (key && value) {
+                                        message[key.toString()] = value;
+                                    }
+                                }
+
+                                this.handleStreamEntry(streamName, idBuffer.toString(), message);
+                            }
                         }
-
-                        this.handleStreamEntry(streamName, idBuffer.toString(), message);
                     }
                 }
             } catch (error) {
@@ -225,6 +235,7 @@ export class RedisManager {
             }
         }
     }
+
     private handleStreamEntry(streamName: string, id: string, message: Record<string, Buffer>): void {
         const frameData = message['image'];
 
