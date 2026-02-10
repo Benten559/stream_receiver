@@ -6,6 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { Redis } from 'ioredis';
 import { initializeConfig } from '../config/index.ts';
 import type { AppConfig } from '../config/index.ts';
 
@@ -16,6 +17,7 @@ interface RecordingSession {
   startTime: Date;
   isRecording: boolean;
   frameCounters: Map<string, number>;  // Per-camera frame counter
+  lastTimestamps: Map<string, string>; // track unique frames
   cameras: Set<string>;        // Cameras recorded in this session
 }
 
@@ -50,6 +52,7 @@ export class FrameRecorder {
       startTime: new Date(),
       isRecording: true,
       frameCounters: new Map(),
+      lastTimestamps: new Map(),
       cameras: new Set(),
     };
 
@@ -78,29 +81,46 @@ export class FrameRecorder {
   /**
    * Record a single frame (called from CameraService)
    */
-  async recordFrame(cameraId: string, frameData: Buffer): Promise<void> {
-    if (!this.currentSession?.isRecording) {
-      return; // Not recording, skip
-    }
-
+  async recordFrame(cameraId: string, redisClient: Redis): Promise<void> {
+    if (!this.currentSession?.isRecording) return;
     const session = this.currentSession;
 
-    // Track camera
-    session.cameras.add(cameraId);
+    try {
+      const hiresKey = `camera_hires:${cameraId}`;
 
-    // Get/increment frame counter for this camera
-    const counter = (session.frameCounters.get(cameraId) || 0) + 1;
-    session.frameCounters.set(cameraId, counter);
+      // Get only the timestamp string
+      const newTimestamp = await redisClient.hget(hiresKey, 'timestamp');
+      const lastTs = session.lastTimestamps.get(cameraId);
 
-    // Build file path: /base/session/cameraId/frame_0001.jpg
-    const cameraDir = path.join(session.sessionPath, cameraId);
-    const filename = `frame_${counter.toString().padStart(4, '0')}.jpg`;
-    const filePath = path.join(cameraDir, filename);
-    // Write frame asynchronously
-    await fs.mkdir(cameraDir, { recursive: true });
-    fs.writeFile(filePath, frameData).catch(err => {
-      console.error(`Failed to write frame ${filePath}:`, err);
-    });
+      // is this frame has already recorded
+      if (!newTimestamp || newTimestamp === lastTs) return;
+
+      // pull the big buffer
+      const hiresBuffer = await redisClient.hgetBuffer(hiresKey, 'image');
+
+      if (hiresBuffer) {
+        // Update tracking
+        session.lastTimestamps.set(cameraId, newTimestamp);
+        session.cameras.add(cameraId);
+
+        const counter = (session.frameCounters.get(cameraId) || 0) + 1;
+        session.frameCounters.set(cameraId, counter);
+
+        // Build path
+        const cameraDir = path.join(session.sessionPath, cameraId);
+        const filename = `frame_${counter.toString().padStart(4, '0')}.jpg`;
+        const filePath = path.join(cameraDir, filename);
+
+        await fs.mkdir(cameraDir, { recursive: true });
+
+        // Non blocking write
+        fs.writeFile(filePath, hiresBuffer).catch(err => {
+          console.error(`Failed to write high-res frame ${filePath}:`, err);
+        });
+      }
+    } catch (err) {
+      console.error(`[FrameRecorder] Error for ${cameraId}:`, err);
+    }
   }
 
   /**

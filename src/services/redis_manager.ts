@@ -44,7 +44,6 @@ export class RedisManager {
         this.streamClient = new Redis(redisConfig);
         this.pubsubClient = new Redis(redisConfig);
         this.scanClient = new Redis(redisConfig);
-
         this.setupEventHandlers();
     }
 
@@ -65,6 +64,10 @@ export class RedisManager {
 
     public getConnectionStatus(): boolean {
         return this.isConnected;
+    }
+
+    public getClient(): Redis {
+        return this.streamClient;
     }
 
     async connect(): Promise<void> {
