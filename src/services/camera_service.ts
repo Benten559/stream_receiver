@@ -67,7 +67,7 @@ export class CameraService {
         state.lastSeen = timestamp;
 
         // Record frame if recording is active
-        this.frameRecorder.recordFrame(cameraId, frameData).catch(err => {
+        this.frameRecorder.recordFrame(cameraId, this.redisManager.getClient()).catch(err => {
             console.error(`Frame recording error for ${cameraId}:`, err);
         });
 
