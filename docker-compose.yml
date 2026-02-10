@@ -23,39 +23,52 @@ services:
     networks:
       - camera-network
     restart: unless-stopped
-
   ###########################################################
   # Express web server - stream receiver                    #
-  ###########################################################
-  # After this launches, webpage should be found on IP:5000 #
-  # Relies on the Redis Server container to be on           #
   ###########################################################
   stream-receiver:
     image: benten559/stream-receiver:latest
     container_name: stream-receiver
+    # user: root # Dev container, to install debug tools inside
     ports:
       - "5000:5000"
     volumes:
       - ${DATA_PATH:-./local_data}:/data 
+      # - .:/app              # Dev container, propogate changes
+      # - /app/node_modules   # Dev container , use existing modules
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=production #development
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_CHANNEL_PATTERN=camera_stream:*
       - SERVER_PORT=5000
-      - UNSUBSCRIBE_DELAY=30
-      - FRAME_SAVE_PATH=/data/frames 
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - camera-network
+    #############################
+    # Comment these below DEV   #
+    #############################
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000/camera/available"]
       interval: 30s
       timeout: 3s
       retries: 3
+    #############################
+    # DEBUG OPTIONS             #
+    #############################
+    # Also: env for NODE_ENV ^  #
+    #   BIND volumes            #
+    #############################
+    # restart: "no"
+    # tty: true
+    # stdin_open: true
+    # command: tail -f /dev/null
+    # healthcheck:
+    #   disable: true
+    #############################
 
   ###########################################################
   # Python camera producer                                  #
@@ -72,8 +85,12 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - CAMERA_ID=raspberrypi
-      - WIDTH=1920
-      - HEIGHT=1080
+      - WIDTH=4056
+      - HEIGHT=3040
+      - L_WIDTH=1024
+      - L_HEIGHT=768
+      - ROT=90
+      - FPS=30
       - JPEG_QUALITY=85
     depends_on:
       redis:
@@ -85,12 +102,19 @@ services:
       - "/dev/media1:/dev/media1" # Access to the ISP/Unicam pipeline
       - "/dev/dma_heap/system:/dev/dma_heap/system"
       - "/dev/dma_heap/linux,cma:/dev/dma_heap/linux,cma"
-    volumes:
-      - "/run/udev:/run/udev:ro" # Critical for libcamera device discovery
     networks:
       - camera-network
-    restart: unless-stopped
-
+    volumes:
+      - "/run/udev:/run/udev:ro" # For libcamera device discovery
+    #############################
+    # DEBUG OPTIONS             #
+    #############################
+    #   - ../Stream4Pi:/app
+    # tty: true
+    # stdin_open: true
+    # restart: unless-stopped #no
+    # command: tail -f /dev/null #dummy cmd
+    #############################
 networks:
   camera-network:
     driver: bridge

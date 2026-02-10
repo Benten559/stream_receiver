@@ -133,22 +133,31 @@ cameraRouter.get('/stream/:cameraId', (req: Request, res: Response) => {
     res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Connection', 'keep-alive');
 
-    const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
-        if (!res.writable) {
-            unsubscribe();
-            return;
-        }
-        try {
-            res.write('--frame\r\n');
-            res.write('Content-Type: image/jpeg\r\n');
-            res.write(`Content-Length: ${frameData.length}\r\n`);
+    let isWriting = false;
+
+const unsubscribe = cameraService.subscribeToCamera(cameraId, (frameData: Buffer) => {
+    // If the previous frame is still being pushed to the network, 
+    // DROP this current frame to keep the stream 'Live'.
+    if (isWriting || !res.writable) return;
+
+    isWriting = true;
+    try {
+        res.write('--frame\r\n');
+        res.write('Content-Type: image/jpeg\r\n');
+        res.write(`Content-Length: ${frameData.length}\r\n`);
+        res.write('\r\n');
+        
+        // Pass a callback to res.write to reset 'isWriting' only 
+        // after the data has actually been cleared from the buffer
+        res.write(frameData, () => {
             res.write('\r\n');
-            res.write(frameData);
-            res.write('\r\n');
-        } catch (err) {
-            unsubscribe();
-        }
-    });
+            isWriting = false; 
+        });
+    } catch (err) {
+        isWriting = false;
+        unsubscribe();
+    }
+});
 
     req.on('close', () => unsubscribe());
 });

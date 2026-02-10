@@ -186,70 +186,54 @@ export class RedisManager {
         if (this.isReading) return;
         this.isReading = true;
 
-        console.log(`[RedisManager] Stream reader started`);
+        // Track multiple lastIds
+        const streamsToRead = [
+            "camera_stream:raspberrypi",
+            "camera_stream:processed"
+        ];
+        let lastIds = streamsToRead.map(() => '$');
 
         while (this.isReading && this.isConnected) {
             try {
-                if (this.activeStreams.size === 0) {
-                    await new Promise(r => setTimeout(r, 1000));
-                    continue;
-                }
+                const data = await this.streamClient.xreadBuffer(
+                    'COUNT', 1,
+                    'BLOCK', 0,
+                    'STREAMS', ...streamsToRead, ...lastIds
+                );
 
-                for (const streamName of this.activeStreams.keys()) {
-                    try {
-                        // Get the LAST entry in the stream (most recent)
-                        const entries = await this.streamClient.xrevrangeBuffer(
-                            streamName,
-                            '+',    // End (most recent)
-                            '-',    // Start (oldest)
-                            'COUNT', 1  // Only get 1
-                        ) as [Buffer, Buffer[]][];
+                if (data) {
+                    for (const [streamNameBuffer, entries] of data) {
+                        const streamName = streamNameBuffer.toString();
 
-                        // Did that result in an entry being retrieved?
-                        if (entries && entries.length > 0) {
-                            const firstEntry = entries[0];
-                            
-                            // Is there data available?
-                            if (firstEntry) {
-                                const [entryIdBuf, fields] = firstEntry;
-                                const entryId = entryIdBuf.toString();
+                        // Check if entries array has items before destructuring
+                        if (entries.length > 0) {
+                            const entry = entries[0];
+                            if (entry) {
+                                const [idBuffer, fields] = entry;
 
-                                // Is this a new frame?
-                                const lastProcessedId = this.activeStreams.get(streamName);
-                                if (entryId !== lastProcessedId) {
-                                    const message: Record<string, Buffer> = {};
-                                    for (let i = 0; i < fields.length; i += 2) {
-                                        const fieldName = fields[i];
-                                        const fieldValue = fields[i + 1];
-                                        
-                                        // Does it have the expected attributes?
-                                        if (fieldName && fieldValue) {
-                                            message[fieldName.toString()] = fieldValue;
-                                        }
+                                // Update the specific lastId for this stream
+                                const streamIndex = streamsToRead.indexOf(streamName);
+                                if (streamIndex !== -1) lastIds[streamIndex] = idBuffer.toString();
+
+                                const message: Record<string, Buffer> = {};
+                                for (let i = 0; i < fields.length; i += 2) {
+                                    const key = fields[i];
+                                    const value = fields[i + 1];
+                                    if (key && value) {
+                                        message[key.toString()] = value;
                                     }
-
-                                    this.handleStreamEntry(streamName, entryId, message);
-                                    this.activeStreams.set(streamName, entryId);
                                 }
+
+                                this.handleStreamEntry(streamName, idBuffer.toString(), message);
                             }
                         }
-                    } catch (streamError) {
-                        console.error(`Error reading stream ${streamName}:`, streamError);
                     }
                 }
-
-                // Small delay to prevent CPU hammering ~30 FPS
-                await new Promise(r => setTimeout(r, 33));
-
             } catch (error) {
-                if (this.isReading) {
-                    console.error('[RedisManager] Stream reader error:', error);
-                    await new Promise(r => setTimeout(r, 2000));
-                }
+                console.error('[RedisManager] XREAD Error:', error);
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
-
-        console.log('[RedisManager] Stream reader stopped');
     }
 
     private handleStreamEntry(streamName: string, id: string, message: Record<string, Buffer>): void {
