@@ -70,9 +70,12 @@ coverage/
 .coverage
 .tox/
 
+
 # Temporary files
 tmp/
 temp/
+local_data/
+nb_env/
 
 # Deployment configs
 deployment/
