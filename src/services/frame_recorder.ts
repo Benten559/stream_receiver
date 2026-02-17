@@ -111,7 +111,7 @@ export class FrameRecorder {
         const filename = `frame_${counter.toString().padStart(4, '0')}.jpg`;
         const filePath = path.join(cameraDir, filename);
 
-        await fs.mkdir(cameraDir, { recursive: true });
+        // await fs.mkdir(cameraDir, { recursive: true });
 
         // Non blocking write
         fs.writeFile(filePath, hiresBuffer).catch(err => {
