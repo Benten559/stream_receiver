@@ -43,7 +43,7 @@ export class FrameRecorder {
     const sessionPath = path.join(basePath, sessionId);
 
     // Create session directory
-    await fs.mkdir(sessionPath, { recursive: true });
+    await fs.mkdir(sessionPath , { recursive: true });
 
     this.currentSession = {
       sessionId,
@@ -101,17 +101,20 @@ export class FrameRecorder {
       if (hiresBuffer) {
         // Update tracking
         session.lastTimestamps.set(cameraId, newTimestamp);
-        session.cameras.add(cameraId);
 
         const counter = (session.frameCounters.get(cameraId) || 0) + 1;
         session.frameCounters.set(cameraId, counter);
 
         // Build path
         const cameraDir = path.join(session.sessionPath, cameraId);
+        if (!session.cameras.has(cameraId)){
+            console.log(`[FrameRecorder] First frame for ${cameraId}, creating: ${cameraDir}`);
+            await fs.mkdir(cameraDir, { recursive: true });
+            session.cameras.add(cameraId);
+        }
         const filename = `frame_${counter.toString().padStart(4, '0')}.jpg`;
         const filePath = path.join(cameraDir, filename);
 
-        // await fs.mkdir(cameraDir, { recursive: true });
 
         // Non blocking write
         fs.writeFile(filePath, hiresBuffer).catch(err => {
