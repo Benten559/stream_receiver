@@ -5,8 +5,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis-camera
-    ports:
-      - "6379:6379"
     volumes:
       - ./logs/redis:/var/log/redis
     command: >
@@ -20,8 +18,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-    networks:
-      - camera-network
+    network_mode: "host"
     restart: unless-stopped
   ###########################################################
   # Express web server - stream receiver                    #
@@ -30,15 +27,13 @@ services:
     image: benten559/stream-receiver:latest
     container_name: stream-receiver
     # user: root # Dev container, to install debug tools inside
-    ports:
-      - "5000:5000"
     volumes:
       - ${DATA_PATH:-./local_data}:/data 
       # - .:/app              # Dev container, propogate changes
       # - /app/node_modules   # Dev container , use existing modules
     environment:
       - NODE_ENV=production #development
-      - REDIS_HOST=redis
+      - REDIS_HOST=localhost
       - REDIS_PORT=6379
       - REDIS_CHANNEL_PATTERN=camera_stream:*
       - SERVER_PORT=5000
@@ -46,8 +41,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    networks:
-      - camera-network
+    network_mode: "host"
     #############################
     # Comment these below DEV   #
     #############################
@@ -84,7 +78,7 @@ services:
     container_name: camera-producer
     profiles: ["pi"]
     environment:
-      - REDIS_HOST=redis
+      - REDIS_HOST=localhost
       - REDIS_PORT=6379
       - CAMERA_ID=raspberrypi
       - WIDTH=4056
@@ -104,8 +98,7 @@ services:
       - "/dev/media1:/dev/media1" # Access to the ISP/Unicam pipeline
       - "/dev/dma_heap/system:/dev/dma_heap/system"
       - "/dev/dma_heap/linux,cma:/dev/dma_heap/linux,cma"
-    networks:
-      - camera-network
+    network_mode: "host"
     volumes:
       - "/run/udev:/run/udev:ro" # For libcamera device discovery
     #############################
@@ -117,6 +110,3 @@ services:
     # restart: unless-stopped #no
     # command: tail -f /dev/null #dummy cmd
     #############################
-networks:
-  camera-network:
-    driver: bridge

@@ -22,18 +22,23 @@ COPY . .
 RUN npm run build
 
 # Production: compiled output + prod deps only
+# Runs as root so entrypoint.sh can chown the bind-mounted /data volume,
+# then drops to stream user via su-exec.
 FROM node:20-alpine AS prod
 WORKDIR /app
+RUN apk add --no-cache su-exec
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/public ./public
-RUN mkdir -p /data/frames && \
+COPY docker-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh && \
+    mkdir -p /data/frames && \
     addgroup -g 1001 -S nodejs && \
     adduser -S stream -u 1001 && \
-    chown -R stream:nodejs /app /data
-USER stream
+    chown -R stream:nodejs /app
 EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost:5000/camera/available || exit 1
+ENTRYPOINT ["entrypoint.sh"]
 CMD ["npm", "start"]
