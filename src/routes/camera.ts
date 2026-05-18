@@ -196,6 +196,44 @@ cameraRouter.get('/holes/sse', (req: Request, res: Response) => {
 });
 
 /**
+ * POST /camera/command
+ * Publishes a command string to the Python backend via Redis pub/sub
+ */
+const VALID_COMMANDS = new Set([
+    'reset',
+    'calibrate',
+    'reset_calibration',
+    'toggle_off',
+    'toggle_on',
+    'stream_view_on',
+    'stream_view_off',
+]);
+
+cameraRouter.post('/command', async (req: Request, res: Response) => {
+    const { command } = req.body;
+
+    if (!command || typeof command !== 'string') {
+        res.status(400).json({ error: 'Missing or invalid "command" field' });
+        return;
+    }
+
+    if (!VALID_COMMANDS.has(command)) {
+        res.status(400).json({
+            error: `Unknown command: '${command}'`,
+            validCommands: [...VALID_COMMANDS],
+        });
+        return;
+    }
+
+    try {
+        await cameraService.sendCommand(command);
+        res.json({ success: true, command });
+    } catch (err: any) {
+        res.status(500).json({ error: `Failed to publish command: ${err.message}` });
+    }
+});
+
+/**
  * Recording Routes
  */
 cameraRouter.post('/recording/start', async (req: Request, res: Response) => {

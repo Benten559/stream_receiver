@@ -286,6 +286,10 @@ export class RedisManager {
         this.holeCallback = callback;
     }
 
+    async publishCommand(channel: string, command: string): Promise<number> {
+        return this.scanClient.publish(channel, command);
+    }
+
     async disconnect(): Promise<void> {
         this.isReading = false;
 

@@ -216,6 +216,13 @@ export class CameraService {
     }
 
     /**
+     * Publish a command to the Python backend via Redis pub/sub
+     */
+    async sendCommand(command: string): Promise<void> {
+        await this.redisManager.publishCommand('camera_controls', command);
+    }
+
+    /**
      * Gracefully shutdown the camera service
      */
     async shutdown(): Promise<void> {
