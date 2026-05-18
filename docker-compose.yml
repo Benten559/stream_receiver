@@ -82,6 +82,7 @@ services:
   camera-producer:
     image: benten559/camera-producer:latest
     container_name: camera-producer
+    profiles: ["pi"]
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
