@@ -1,0 +1,18 @@
+services:
+  stream-receiver:
+    build:
+      context: .
+      target: dev
+    image: stream-receiver:dev
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+    environment:
+      - NODE_ENV=development
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=500
+    healthcheck:
+      disable: true
+    restart: "no"
+    tty: true
+    stdin_open: true

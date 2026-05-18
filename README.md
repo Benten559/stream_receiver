@@ -47,7 +47,9 @@ stream_receiver/
 ├── data/frames/               # Frame recording output directory
 ├── package.json
 ├── tsconfig.json
-└── nodemon.json
+├── Dockerfile
+├── docker-compose.yml
+└── docker-compose.dev.yml
 ```
 
 ## Quick Start
@@ -91,15 +93,63 @@ stream_receiver/
    - Open http://localhost:5000 in your browser
    - Camera streams will appear as buttons when detected
 
+## Docker
+
+Multi-stage Dockerfile with `dev` and `prod` targets. The production image is published as
+a multi-arch manifest (`linux/amd64` + `linux/arm64`) so the same tag runs on both a
+development machine and a Raspberry Pi without any changes to the compose file.
+
+### Running the full stack (production)
+
+On a **Raspberry Pi**, start all services including the camera producer:
+
+```bash
+docker compose --profile pi up
+```
+
+On a **development machine** (no camera hardware), omit the profile to start only Redis and the stream-receiver:
+
+```bash
+docker compose up
+```
+
+> `camera-producer` uses Linux-specific device paths (`/dev/video0`, `/dev/media0`, etc.) and will only run correctly on the Pi. It is gated behind the `pi` profile so it is skipped by default on other platforms.
+
+### Dev auto-reload
+
+Builds the `dev` image locally, bind-mounts `src/` and `public/` into the container,
+and starts nodemon so source changes are picked up without rebuilding.
+Works on both Windows (Docker Desktop) and Linux:
+
+```bash
+npm run docker:dev
+```
+
+### Publishing a new production image
+
+Requires a buildx builder with multi-platform support. First-time setup:
+
+```bash
+docker buildx create --use --name multiplatform --platform linux/amd64,linux/arm64
+```
+
+Then build and push:
+
+```bash
+npm run docker:push
+```
+
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start development server with auto-reload |
+| `npm run dev` | Start development server with auto-reload (local) |
 | `npm run build` | Compile TypeScript to JavaScript |
 | `npm run build:server` | Compile server-side TypeScript only |
 | `npm run build:client` | Compile client-side TypeScript only |
 | `npm start` | Run production build |
+| `npm run docker:dev` | Start dev stack in Docker with live reload |
+| `npm run docker:push` | Build and push multi-arch production image |
 
 ## API Endpoints
 
