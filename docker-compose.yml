@@ -24,7 +24,7 @@ services:
   # Express web server - stream receiver                    #
   ###########################################################
   stream-receiver:
-    image: benten559/stream-receiver:latest
+    image: benten559/stream-receiver:latest-prod
     container_name: stream-receiver
     # user: root # Dev container, to install debug tools inside
     volumes:
@@ -91,6 +91,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
     privileged: true
     devices:
       - /dev/video0:/dev/video0

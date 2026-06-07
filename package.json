@@ -12,7 +12,9 @@
     "build:client": "tsc -p src/client/tsconfig.json",
     "start": "node dist/server.js",
     "docker:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build",
-    "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 --target prod -t benten559/stream-receiver:latest --push ."
+    "docker:push:prod": "docker buildx build --platform linux/amd64,linux/arm64 --target prod -t benten559/stream-receiver:latest-prod --push .",
+    "docker:push:dev": "docker buildx build --platform linux/amd64,linux/arm64 --target dev -t benten559/stream-receiver:latest-dev --push .",
+    "docker:push": "npm run docker:push:prod && npm run docker:push:dev"
   },
   "repository": {
     "type": "git",
