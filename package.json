@@ -5,13 +5,13 @@
   "description": "Web Server for Redis camera streams",
   "main": "index.js",
   "scripts": {
-    "test": "ts-node src/server.ts",
-    "dev": "nodemon --exec ts-node src/server.ts",
+    "test": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "npm run build:server && npm run build:client",
     "build:server": "tsc",
     "build:client": "tsc -p src/client/tsconfig.json",
     "start": "node dist/server.js",
-    "docker:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up",
+    "docker:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build",
     "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 --target prod -t benten559/stream-receiver:latest --push ."
   },
   "repository": {
@@ -34,6 +34,7 @@
     "@types/node": "^24.10.9",
     "nodemon": "^3.1.11",
     "ts-node": "^10.9.2",
+    "tsx": "^4.22.1",
     "typescript": "^5.9.3"
   }
 }

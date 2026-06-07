@@ -2,37 +2,36 @@ import { IStreamClient } from "../types/streaming.types";
 
 /**
  * MJPEG Stream Client
- * Only emits frame events when the image actually changes
- * This prevents rendering the same frame multiple times
+ * Renders frames from a multipart/x-mixed-replace MJPEG endpoint.
+ *
+ * The render loop starts immediately on connect() and spins via RAF.
+ * naturalWidth > 0 gates frame events so they only fire after the
+ * first JPEG part is decoded — no dependency on img.onload timing.
  */
 export class MJPEGStreamClient extends EventTarget implements IStreamClient {
   private img: HTMLImageElement;
   private url: string;
   private isConnected: boolean = false;
   private animationFrameId: number | null = null;
-  private imageReady: boolean = false;
-  
-  // Track last frame to detect changes
+
   private lastFrameTime: number = 0;
   private frameCount: number = 0;
   private lastFpsLog: number = Date.now();
-  
+
   constructor(cameraId: string) {
     super();
     this.url = `/camera/stream/${cameraId}`;
     this.img = new Image();
-    this.img.crossOrigin = 'anonymous';
+    // crossOrigin NOT set — same-origin stream, no CORS restriction needed,
+    // and setting it can taint the canvas with certain MJPEG streams.
   }
 
   connect() {
     this.isConnected = true;
-    this.imageReady = false;
 
     this.img.onload = () => {
       if (!this.isConnected) return;
-      console.log(`[MJPEG] Stream loaded: ${this.img.naturalWidth}x${this.img.naturalHeight}`);
-      this.imageReady = true;
-      this.startRenderLoop();
+      console.log(`[MJPEG] First frame decoded: ${this.img.naturalWidth}x${this.img.naturalHeight}`);
     };
 
     this.img.onerror = (e) => {
@@ -43,36 +42,34 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
     };
 
     this.img.src = this.url;
+
+    // Start the render loop immediately — don't wait for onload.
+    // The naturalWidth guard inside emitFrame prevents events firing
+    // before the first frame has been decoded.
+    this.startRenderLoop();
     this.dispatchEvent(new CustomEvent('connected'));
   }
 
-  /**
-   * Only emit frames at a limited rate to prevent overwhelming renderer
-   * Will limit the images being rendered to webpage to be 30 FPS mapx
-   */
   private startRenderLoop() {
     const emitFrame = () => {
-      if (!this.isConnected || !this.imageReady) return;
+      // Only stop on explicit disconnect.
+      if (!this.isConnected) return;
 
-      const now = performance.now();
-      
-      // Only emit frames every 33ms (~30 FPS max)
-      // This prevents emitting 60 FPS when RAF runs faster than MJPEG updates
-      if (now - this.lastFrameTime >= 33) {  // 30 FPS limit
-        
-        // Only emit if image has valid dimensions
-        if (this.img.naturalWidth > 0 && this.img.naturalHeight > 0) {
+      // Gate on actual decoded dimensions — 0 means no frame yet.
+      if (this.img.naturalWidth > 0 && this.img.naturalHeight > 0) {
+        const now = performance.now();
+
+        if (now - this.lastFrameTime >= 33) { // ~30 FPS cap
           this.dispatchEvent(new CustomEvent('frame', {
             detail: {
               image: this.img,
               timestamp: Date.now()
             }
           }));
-          
+
           this.lastFrameTime = now;
           this.frameCount++;
-          
-          // Log actual FPS every 2 seconds
+
           const elapsed = Date.now() - this.lastFpsLog;
           if (elapsed >= 2000) {
             const fps = (this.frameCount / elapsed) * 1000;
@@ -83,17 +80,15 @@ export class MJPEGStreamClient extends EventTarget implements IStreamClient {
         }
       }
 
-      // Continue the loop
+      // Always reschedule — loop only dies on disconnect.
       this.animationFrameId = requestAnimationFrame(emitFrame);
     };
 
-    // Start the loop
     this.animationFrameId = requestAnimationFrame(emitFrame);
   }
 
   disconnect() {
     this.isConnected = false;
-    this.imageReady = false;
 
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);

@@ -1,15 +1,10 @@
 import type { AvailableCamerasResponse } from '../../types/api.types.js';
-import { CanvasRenderer } from './streaming/canvas_renderer.js';
-import { MJPEGStreamClient } from './streaming/MJPEGStreamClient.js';
 import { setupRecordingControls } from './features/frame_recording_controls.js';
-import type { BinaryFrame, IStreamClient } from './types/streaming.types.js';
 
-// Track current stream
-let currentStreamClient: IStreamClient | null = null;
-let currentRenderer: CanvasRenderer | null = null;
+let currentStreamImg: HTMLImageElement | null = null;
+let currentOverlayCanvas: HTMLCanvasElement | null = null;
 let holeNotificationSource: EventSource | null = null;
 
-// Store detected holes for drawing
 interface DetectedHole {
   x: number;
   y: number;
@@ -17,13 +12,8 @@ interface DetectedHole {
 }
 let detectedHoles: DetectedHole[] = [];
 
-/**
- * Fetch available cameras from server
- * Uses /camera/discover to trigger stream discovery on page load
- */
 async function fetchAvailableCameras(): Promise<string[]> {
   try {
-    // Use discover endpoint to trigger stream discovery
     const response = await fetch('/camera/discover');
     const data: AvailableCamerasResponse = await response.json();
     return data.cameras;
@@ -33,9 +23,6 @@ async function fetchAvailableCameras(): Promise<string[]> {
   }
 }
 
-/**
- * Create a button for selecting a camera
- */
 function createCameraButton(cameraId: string): HTMLButtonElement {
   const button = document.createElement('button');
   button.textContent = `Camera: ${cameraId}`;
@@ -47,12 +34,6 @@ function createCameraButton(cameraId: string): HTMLButtonElement {
   return button;
 }
 
-/**
- * Start MJPEG stream for a camera
- */
-// DEBUGGING VERSION - Add this to your camera_selection.ts
-// This will tell us EXACTLY where the bottleneck is
-
 function startMJPEGStream(cameraId: string): void {
   const streamViewElement = document.getElementById('stream-viewer');
   if (!streamViewElement) return;
@@ -60,96 +41,46 @@ function startMJPEGStream(cameraId: string): void {
   cleanupCurrentStream();
   streamViewElement.innerHTML = '';
 
-  // DEBUG COUNTERS
-  let framesReceived = 0;
-  let framesRendered = 0;
-  let framesDropped = 0;
-  let renderTimeTotal = 0;
-  let lastDebugLog = Date.now();
-  
-  let isProcessingFrame = false;
-
   try {
-    currentRenderer = new CanvasRenderer(
-      'stream-viewer',
-      cameraId,
-      `Camera: ${cameraId}`
-    );
+    const wrapper = document.createElement('div');
+    wrapper.className = 'stream-canvas-container';
+    wrapper.style.position = 'relative';
+    wrapper.style.display = 'inline-block';
 
-    currentStreamClient = new MJPEGStreamClient(cameraId);
+    const labelDiv = document.createElement('div');
+    labelDiv.className = 'label';
+    labelDiv.textContent = `Camera: ${cameraId}`;
+    wrapper.appendChild(labelDiv);
 
-    // Handle incoming MJPEG frames WITH DETAILED LOGGING
-    currentStreamClient.addEventListener('frame', async (event: Event) => {
-      framesReceived++;
-      
-      const customEvent = event as CustomEvent;
-      const data = customEvent.detail;
-
-      if (!data) return;
-
-      // Frame dropping
-      if (isProcessingFrame) {
-        framesDropped++;
-        return;
+    // MJPEG display: browser updates this img natively on each multipart frame.
+    // The img must be in the DOM — off-DOM img elements don't receive pixel
+    // updates from MJPEG streams in Chrome.
+    const img = document.createElement('img');
+    img.style.display = 'block';
+    img.style.maxWidth = '100%';
+    img.onload = () => {
+      console.log(`[MJPEG] First frame decoded: ${img.naturalWidth}x${img.naturalHeight}`);
+      if (currentOverlayCanvas) {
+        currentOverlayCanvas.width = img.naturalWidth;
+        currentOverlayCanvas.height = img.naturalHeight;
       }
+    };
+    img.onerror = (e) => console.error('[MJPEG] Stream error:', e);
 
-      isProcessingFrame = true;
-      const renderStart = performance.now();
+    // Transparent canvas layered on top of the img for hole markers
+    const overlay = document.createElement('canvas');
+    overlay.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;max-width:100%;';
 
-      try {
-        if (data.image && data.image instanceof HTMLImageElement) {
-          currentRenderer!.renderFrame(data.image);
-          drawDetectedHoles();
-          framesRendered++;
-        }
-        else if (data.base64Data) {
-          const imgData = await currentRenderer!.decodeFrame(data.base64Data);
-          if (imgData) {
-            currentRenderer!.renderFrame(imgData);
-            drawDetectedHoles();
-            framesRendered++;
-          }
-        }
-        else {
-          console.warn("Unrecognized frame format:", data);
-        }
-      } catch (error) {
-        console.error('Failed to render frame:', error);
-      } finally {
-        const renderEnd = performance.now();
-        renderTimeTotal += (renderEnd - renderStart);
-        isProcessingFrame = false;
-      }
-      
-      // Debug log every 2 seconds
-      const now = Date.now();
-      if (now - lastDebugLog >= 2000) {
-        const elapsed = (now - lastDebugLog) / 1000;
-        const receiveFps = framesReceived / elapsed;
-        const renderFps = framesRendered / elapsed;
-        const avgRenderTime = framesRendered > 0 ? renderTimeTotal / framesRendered : 0;
-        
-        console.debug('═══════════════════════════════════════');
-        console.debug(`[DEBUG] Frames received: ${receiveFps.toFixed(1)} FPS`);
-        console.debug(`[DEBUG] Frames rendered:  ${renderFps.toFixed(1)} FPS`);
-        console.debug(`[DEBUG] Frames dropped:   ${framesDropped}`);
-        console.debug(`[DEBUG] Avg render time:  ${avgRenderTime.toFixed(1)}ms`);
-        console.debug(`[DEBUG] Processing busy:  ${isProcessingFrame ? 'YES' : 'NO'}`);
-        console.debug('═══════════════════════════════════════');
-        
-        // Reset counters
-        framesReceived = 0;
-        framesRendered = 0;
-        framesDropped = 0;
-        renderTimeTotal = 0;
-        lastDebugLog = now;
-      }
-    });
+    wrapper.appendChild(img);
+    wrapper.appendChild(overlay);
+    streamViewElement.appendChild(wrapper);
 
-    currentStreamClient.addEventListener('connected', () => console.log(`MJPEG Connected: ${cameraId}`));
-    currentStreamClient.addEventListener('error', (e) => showError(streamViewElement, `MJPEG Error: ${cameraId}`));
+    currentStreamImg = img;
+    currentOverlayCanvas = overlay;
 
-    currentStreamClient.connect();
+    img.src = `/camera/stream/${cameraId}`;
+    console.log(`MJPEG stream started: ${cameraId}`);
+
     startHoleNotificationListener();
     addRecordingButton();
 
@@ -158,27 +89,19 @@ function startMJPEGStream(cameraId: string): void {
   }
 }
 
-/**
- * Render camera selection buttons
- */
 function renderCameraButtons(cameras: string[]): void {
   const container = document.getElementById('camera-buttons');
   if (!container) {
     console.error('Camera buttons container not found');
     return;
   }
-
   cameras.forEach(cameraId => {
     const button = createCameraButton(cameraId);
     container.appendChild(button);
   });
 }
 
-/**
- * Start listening for hole detection notifications from the algo brain
- */
 function startHoleNotificationListener(): void {
-  // Close existing listener
   if (holeNotificationSource) {
     holeNotificationSource.close();
   }
@@ -189,46 +112,27 @@ function startHoleNotificationListener(): void {
     try {
       const data = JSON.parse(event.data);
       console.log(`Hole detected at (${data.x}, ${data.y})`);
-
-      // Add to detected holes list
-      detectedHoles.push({
-        x: data.x,
-        y: data.y,
-        timestamp: data.timestamp,
-      });
-
-      // Keep only last 50 holes
-      if (detectedHoles.length > 50) {
-        detectedHoles = detectedHoles.slice(-50);
-      }
-
+      detectedHoles.push({ x: data.x, y: data.y, timestamp: data.timestamp });
+      if (detectedHoles.length > 50) detectedHoles = detectedHoles.slice(-50);
+      drawDetectedHoles();
     } catch (error) {
       console.error('Failed to parse hole notification:', error);
     }
   });
 
-  holeNotificationSource.addEventListener('open', () => {
-    console.log('Connected to hole notifications');
-  });
-
-  holeNotificationSource.addEventListener('error', () => {
-    console.error('Hole notification connection error');
-  });
+  holeNotificationSource.addEventListener('open', () => console.log('Connected to hole notifications'));
+  holeNotificationSource.addEventListener('error', () => console.error('Hole notification connection error'));
 }
 
-/**
- * Draw detected holes on the canvas
- */
 function drawDetectedHoles(): void {
-  if (!currentRenderer || detectedHoles.length === 0) {
-    return;
-  }
+  if (!currentOverlayCanvas) return;
 
-  const canvas = currentRenderer.getCanvas();
-  const ctx = canvas.getContext('2d');
+  const ctx = currentOverlayCanvas.getContext('2d');
   if (!ctx) return;
 
-  // Draw each detected hole as a red circle
+  ctx.clearRect(0, 0, currentOverlayCanvas.width, currentOverlayCanvas.height);
+  if (detectedHoles.length === 0) return;
+
   ctx.strokeStyle = 'red';
   ctx.lineWidth = 3;
 
@@ -236,8 +140,6 @@ function drawDetectedHoles(): void {
     ctx.beginPath();
     ctx.arc(hole.x, hole.y, 15, 0, 2 * Math.PI);
     ctx.stroke();
-
-    // Add a small dot at center
     ctx.fillStyle = 'red';
     ctx.beginPath();
     ctx.arc(hole.x, hole.y, 3, 0, 2 * Math.PI);
@@ -245,79 +147,49 @@ function drawDetectedHoles(): void {
   }
 }
 
-/**
- * Cleanup current stream
- */
 function cleanupCurrentStream(): void {
-  if (currentStreamClient) {
-    currentStreamClient.disconnect();
-    currentStreamClient = null;
+  if (currentStreamImg) {
+    currentStreamImg.src = '';
+    currentStreamImg.onload = null;
+    currentStreamImg.onerror = null;
+    currentStreamImg = null;
   }
-
-  if (currentRenderer) {
-    currentRenderer.destroy();
-    currentRenderer = null;
-  }
+  currentOverlayCanvas = null;
 
   if (holeNotificationSource) {
     holeNotificationSource.close();
     holeNotificationSource = null;
   }
 
-  // Clear detected holes
   detectedHoles = [];
 
-  // Clear feature options
   const featureOptions = document.getElementById('feature-options');
-  if (featureOptions) {
-    featureOptions.innerHTML = '';
-  }
+  if (featureOptions) featureOptions.innerHTML = '';
 }
 
-/**
- * Add frame recording button
- */
 function addRecordingButton(): void {
+  const featureOptions = document.getElementById('feature-options');
+  if (!featureOptions) return;
+
   const recordingBtn = document.createElement('button');
   recordingBtn.textContent = 'Frame Recording';
   recordingBtn.className = 'feature-toggle-button';
-  recordingBtn.addEventListener('click', () => {
-    setupRecordingControls();
-  });
+  recordingBtn.addEventListener('click', () => setupRecordingControls());
+  featureOptions.appendChild(recordingBtn);
 
-  const featureOptions = document.getElementById('feature-options');
-  if (featureOptions) {
-    featureOptions.appendChild(recordingBtn);
-  }
-
-  // Add clear holes button
   const clearHolesBtn = document.createElement('button');
   clearHolesBtn.textContent = 'Clear Holes';
   clearHolesBtn.className = 'feature-toggle-button';
   clearHolesBtn.addEventListener('click', () => {
     detectedHoles = [];
+    drawDetectedHoles();
     console.log('Cleared detected holes');
   });
-  featureOptions?.appendChild(clearHolesBtn);
+  featureOptions.appendChild(clearHolesBtn);
 }
 
-/**
- * Show error message
- */
-function showError(container: HTMLElement, message: string): void {
-  container.innerHTML = '';
-  const errorMsg = document.createElement('p');
-  errorMsg.textContent = message;
-  errorMsg.style.color = 'red';
-  container.appendChild(errorMsg);
-}
+window.addEventListener('beforeunload', () => cleanupCurrentStream());
 
-// Cleanup on page unload
-window.addEventListener('beforeunload', () => {
-  cleanupCurrentStream();
-});
-
-// Initialize
 const cameras = await fetchAvailableCameras();
 console.log('Available cameras:', cameras);
 renderCameraButtons(cameras);
