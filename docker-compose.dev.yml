@@ -1,14 +1,26 @@
 services:
+  redis:
+    network_mode: ""
+    networks:
+      - camera-network
+    ports:
+      - "6379:6379"
   stream-receiver:
     build:
       context: .
       target: dev
     image: stream-receiver:dev
+    network_mode: ""
+    networks:
+      - camera-network
+    ports:
+      - "5000:5000"
     volumes:
       - ./src:/app/src
       - ./public:/app/public
     environment:
       - NODE_ENV=development
+      - REDIS_HOST=redis
       - CHOKIDAR_USEPOLLING=true
       - CHOKIDAR_INTERVAL=500
     healthcheck:
@@ -16,3 +28,7 @@ services:
     restart: "no"
     tty: true
     stdin_open: true
+
+networks:
+  camera-network:
+    driver: bridge
